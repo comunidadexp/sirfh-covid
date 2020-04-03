@@ -8,7 +8,7 @@ from datetime import timedelta, datetime
 import datetime as dt
 
 
-class Learner(object):
+class SIR(object):
     def __init__(self,
                  country='Brazil',
                  N = 200e6,
@@ -24,6 +24,8 @@ class Learner(object):
                  forcedBeta = None,
                  forcedGamma = None,
                  log = False,
+                 betaBounds = (0.00000001, 2.0),
+                 gammaBounds=(0.00000001, 2.0),
                  ):
 
         self.country = country
@@ -40,6 +42,8 @@ class Learner(object):
         self.forcedBeta = forcedBeta
         self.forcedGamma = forcedGamma
         self.log = log
+        self.betaBounds = betaBounds
+        self.gammaBounds = gammaBounds
 
         self.load_data()
 
@@ -92,14 +96,16 @@ class Learner(object):
         self.fatal = self.fatal.loc[nth_index:]
         self.recovered = self.recovered.loc[nth_index:]
 
-        #Initial parameters
-        self.R_0 = self.recovered[0] + self.fatal[0]
-        self.I_0 = (self.confirmed.iloc[0] - self.R_0)
-        self.S_0 = self.N - self.R_0 - self.I_0
+        self.initialize_parameters()
 
         #True data series
         self.R_actual = self.fatal + self.recovered
         self.I_actual = self.confirmed - self.R_actual
+
+    def initialize_parameters(self):
+        self.R_0 = self.recovered[0] + self.fatal[0]
+        self.I_0 = (self.confirmed.iloc[0] - self.R_0)
+        self.S_0 = self.N - self.R_0 - self.I_0
 
     def extend_index(self, index, new_size):
 
@@ -113,19 +119,19 @@ class Learner(object):
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
 
         if not self.forcedBeta:
-            betaBounds = (0.00000001, 2.0)
+            betaBounds = self.betaBounds
         else:
             betaBounds = (self.forcedBeta, self.forcedBeta)
 
         if not self.forcedGamma:
-            gammaBounds = (0.00000001, 2.0)
+            gammaBounds = self.gammaBounds
         else:
             gammaBounds = (self.forcedGamma, self.forcedGamma)
 
         if self.estimateBeta2:
             optimal = minimize(
                 self.loss,
-                [0.001, 0.001, 0.001],
+                [0.2, 0.07, 0.2],
                 args=(),
                 method='L-BFGS-B',
                 # options={'maxiter' : 5},
@@ -142,7 +148,7 @@ class Learner(object):
         else:
             optimal = minimize(
                 self.loss,
-                [0.001, 0.001,],
+                [0.2, 0.07,],
                 args=(),
                 method='L-BFGS-B',
                 # options={'maxiter' : 5},
@@ -352,6 +358,59 @@ class Learner(object):
         ax.set_title(self.country)
         self.df.plot(ax=ax)
 
+
+class SEIR(SIR):
+    def __init__(self,
+                 incubationPeriod = 7,
+                 **kwargs):
+
+        self.incubationPeriod = incubationPeriod
+        self.sigma = 1 / incubationPeriod
+        super().__init__(**kwargs)
+
+
+    def initialize_parameters(self):
+        ## incubated E_0 = 1/incPeriod * each of the following incPeriod days
+        #TODO check
+        self.E_0 = ((self.confirmed - self.recovered - self.fatal).iloc[0:(self.incubationPeriod-1)]).sum() / self.incubationPeriod
+        self.R_0 = self.recovered[0] + self.fatal[0]
+        self.I_0 = (self.confirmed.iloc[0] - self.R_0)
+        self.S_0 = self.N - self.R_0 - self.I_0
+
+    def loss(self, point):
+        """
+        RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
+        """
+        size = self.confirmed.shape[0]
+        sigma = self.sigma
+        if self.estimateBeta2:
+            beta, gamma, beta2 = point
+        else:
+            beta, gamma = point
+            beta2 = beta
+
+        def SIR(t, y):
+            S = y[0]
+            E = y[1]
+            I = y[2]
+            R = y[3]
+
+            if t < self.quarantine_loc:
+                ret = [-beta * S * I / self.N, beta * S * I / self.N - sigma * E, sigma * E - gamma * I, gamma * I]
+            else:
+                ret = [-beta2 * S * I / self.N, beta2 * S * I / self.N - sigma * E, sigma * E - gamma * I, gamma * I]
+            return ret
+
+        solution = solve_ivp(SIR, [0, size], [self.S_0, self.E_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
+
+        # Put more emphasis on recovered people
+        alpha = self.alpha
+
+        l1 = np.sqrt(np.mean((solution.y[2] - self.I_actual) ** 2))
+        l2 = np.sqrt(np.mean((solution.y[3] - self.R_actual) ** 2))
+
+        return alpha * l1 + (1 - alpha) * l2
+
 class LearnerSEIR(object):
     def __init__(self,
                  country='Brazil',
@@ -483,7 +542,7 @@ class LearnerSEIR(object):
         else:
             optimal = minimize(
                 self.loss,
-                [0.001, 0.001, 0.001],
+                [0.1, 0.001, 0.1],
                 args=(),
                 method='L-BFGS-B',
                 # options={'maxiter' : 5},
@@ -697,8 +756,13 @@ class LearnerSEIR(object):
 
 
 if __name__ == '__main__':
-    jap = Learner('Brazil', N=200e6, alpha=0.7)
+    jap = SIR('Brazil',
+                  N=200e6,
+                  alpha=0.7,
+                  betaBounds=(0.1, 0.3),
+                  gammaBounds=(0.05, 0.1),
+                  )
     # out = jap.train()
     jap.train()
     # jap.estimate()
-    jap.predict_linear(beta=0.2, gamma=0.07)
+    # jap.predict_linear(beta=0.2, gamma=0.07)
