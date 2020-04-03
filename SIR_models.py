@@ -26,6 +26,9 @@ class SIR(object):
                  log = False,
                  betaBounds = (0.00000001, 2.0),
                  gammaBounds=(0.00000001, 2.0),
+                 hospRate = 0.15,
+                 daysToHosp = 7,
+                 daysToLeave = 7,
                  ):
 
         self.country = country
@@ -44,6 +47,9 @@ class SIR(object):
         self.log = log
         self.betaBounds = betaBounds
         self.gammaBounds = gammaBounds
+        self.hospRate = hospRate
+        self.daysToHosp = daysToHosp
+        self.daysToLeave = daysToLeave
 
         self.load_data()
 
@@ -262,6 +268,7 @@ class SIR(object):
         #     df = df.transform(np.exp)
 
         self.df = df
+        self.calculateNB()
         print("Predicting with Beta:{beta} Beta2: {beta2} Gamma:{gamma}".format(beta=beta, gamma=gamma, beta2=beta2))
 
     def predict_linear(self, beta=None, gamma=None):
@@ -346,6 +353,14 @@ class SIR(object):
         # self.df.plot(ax=ax)
         # fig.savefig(f"{self.country}.png")
 
+    def calculateNB(self):
+        #X% of new cases need hospitalization after n days
+        #First tryout is right after new cases bluntly after n days
+        self.df['hospDemand'] = ((self.df['S'].shift(1) - self.df['S']) * self.hospRate).shift(self.daysToHosp)
+        self.df['hospExpire'] = - self.df['hospDemand'].shift(self.daysToLeave)
+        self.df['H'] = self.df['hospDemand'] - self.df['hospExpire']
+        self.df.drop(['hospDemand', 'hospExpire'], axis=1, inplace=True)
+
 ############## VISUALIZATION METHODS ################
     def I_fit_plot(self):
         self.df[['I_Actual', 'I']].loc[:self.end_data].plot()
@@ -362,8 +377,9 @@ class SIR(object):
 class SEIR(SIR):
     def __init__(self,
                  incubationPeriod = 7,
+                 forceE0 = None,
                  **kwargs):
-
+        self.forceE0 = forceE0
         self.incubationPeriod = incubationPeriod
         self.sigma = 1 / incubationPeriod
         super().__init__(**kwargs)
@@ -372,7 +388,9 @@ class SEIR(SIR):
     def initialize_parameters(self):
         ## incubated E_0 = 1/incPeriod * each of the following incPeriod days
         #TODO check
-        self.E_0 = ((self.confirmed - self.recovered - self.fatal).iloc[0:(self.incubationPeriod-1)]).sum() / self.incubationPeriod
+        self.E_0 = int(((self.confirmed - self.recovered - self.fatal).iloc[0:(self.incubationPeriod-1)]).sum() / self.incubationPeriod)
+        if self.forceE0:
+            self.E_0 = self.forceE0
         self.R_0 = self.recovered[0] + self.fatal[0]
         self.I_0 = (self.confirmed.iloc[0] - self.R_0)
         self.S_0 = self.N - self.R_0 - self.I_0
@@ -410,6 +428,76 @@ class SEIR(SIR):
         l2 = np.sqrt(np.mean((solution.y[3] - self.R_actual) ** 2))
 
         return alpha * l1 + (1 - alpha) * l2
+
+    def predict(self, beta=None, gamma=None):
+        """
+        Predict how the number of people in each compartment can be changed through time toward the future.
+        The model is formulated with the given beta and gamma.
+        """
+
+        sigma = self.sigma
+
+        #In case predict function is called with custom parameters
+        if not beta:
+            beta = self.beta
+        if not gamma:
+            gamma = self.gamma
+
+
+        if self.estimateBeta2:
+            beta2 = self.beta2
+        else:
+            beta2 = beta
+
+        if self.estimateBeta3:
+            # beta3 = self.beta2
+            beta3 = (self.beta2 + self.beta) / 2
+        else:
+            beta3 = beta
+
+        predict_range = self.daysPredict
+
+        # print(self.confirmed.index)
+        new_index = self.extend_index(self.confirmed.index, predict_range)
+        # print(new_index) #AQUI JA ESTA ERRADO
+
+        size = len(new_index)
+
+        def SIR(t, y):
+            S = y[0]
+            E = y[1]
+            I = y[2]
+            R = y[3]
+
+            if t < self.quarantine_loc:
+                ret = [-beta * S * I / self.N, beta * S * I / self.N - sigma * E, sigma * E - gamma * I, gamma * I]
+            else:
+                ret = [-beta2 * S * I / self.N, beta2 * S * I / self.N - sigma * E, sigma * E - gamma * I, gamma * I]
+            return ret
+
+        # print(self.backDate)
+        # print(new_index.get_loc(self.backDate))
+        self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
+        self.back_loc = float(new_index.get_loc(self.backDate))
+
+        prediction = solve_ivp(SIR, [0, size], [self.S_0, self.E_0, self.I_0, self.R_0],
+                               t_eval=np.arange(0, size, 1))
+
+        df = pd.DataFrame({
+            'I_Actual': self.I_actual.reindex(new_index),
+            'R_Actual': self.R_actual.reindex(new_index),
+            'S': prediction.y[0],
+            'E': prediction.y[1],
+            'I': prediction.y[2],
+            'R': prediction.y[3]
+        }, index=new_index)
+
+        # if self.log:
+        #     df = df.transform(np.exp)
+
+        self.df = df
+        print("Predicting with Beta:{beta} Beta2: {beta2} Gamma:{gamma} Sigma:{sigma}".format(sigma=sigma,beta=beta, gamma=gamma, beta2=beta2))
+
 
 class LearnerSEIR(object):
     def __init__(self,
@@ -756,13 +844,18 @@ class LearnerSEIR(object):
 
 
 if __name__ == '__main__':
-    jap = SIR('Brazil',
-                  N=200e6,
-                  alpha=0.7,
-                  betaBounds=(0.1, 0.3),
-                  gammaBounds=(0.05, 0.1),
-                  )
-    # out = jap.train()
+    # jap = SIR('Brazil',
+    #               N=200e6,
+    #               alpha=0.7,
+    #               betaBounds=(0.1, 0.3),
+    #               gammaBounds=(0.05, 0.1),
+    #               )
+    # jap.train()
+
+    jap = SEIR(country='Brazil',
+              N=200e6,
+              alpha=0.7,
+              betaBounds=(0.1, 0.3),
+              gammaBounds=(0.05, 0.1),
+              )
     jap.train()
-    # jap.estimate()
-    # jap.predict_linear(beta=0.2, gamma=0.07)
