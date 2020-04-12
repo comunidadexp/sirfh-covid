@@ -18,14 +18,17 @@ class SIR(object):
                  daysPredict=150,
                  estimateBeta2 = False,
                  estimateBeta3 = False,
+                 estimateS0 = False,
                  quarantineDate = None,
                  backDate = dt.datetime(2020, 4, 22),
                  alpha=0.5,
                  forcedBeta = None,
+                 forcedBeta2 = None,
                  forcedGamma = None,
                  log = False,
                  betaBounds = (0.00000001, 2.0),
                  gammaBounds=(0.00000001, 2.0),
+                 S0bounds = (10000, 10e6),
                  hospRate = 0.15,
                  daysToHosp = 7,
                  daysToLeave = 7,
@@ -41,12 +44,15 @@ class SIR(object):
         self.backDate = backDate
         self.estimateBeta2 = estimateBeta2
         self.estimateBeta3 = estimateBeta3
+        self.estimateS0 = estimateS0
         self.alpha = alpha
         self.forcedBeta = forcedBeta
+        self.forcedBeta2 = forcedBeta2
         self.forcedGamma = forcedGamma
         self.log = log
         self.betaBounds = betaBounds
         self.gammaBounds = gammaBounds
+        self.S0bounds = S0bounds
         self.hospRate = hospRate
         self.daysToHosp = daysToHosp
         self.daysToLeave = daysToLeave
@@ -120,7 +126,7 @@ class SIR(object):
 
         return new_index
 
-    def estimate(self):
+    def estimate(self, verbose=True):
 
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
 
@@ -128,6 +134,11 @@ class SIR(object):
             betaBounds = self.betaBounds
         else:
             betaBounds = (self.forcedBeta, self.forcedBeta)
+
+        if not self.forcedBeta2:
+            betaBounds2 = self.betaBounds
+        else:
+            betaBounds2 = (self.forcedBeta2, self.forcedBeta2)
 
         if not self.forcedGamma:
             gammaBounds = self.gammaBounds
@@ -142,11 +153,12 @@ class SIR(object):
                 method='L-BFGS-B',
                 # options={'maxiter' : 5},
                 # method='TNC',
-                bounds=[betaBounds, gammaBounds, (0.00000001, 2.0), ]
+                bounds=[betaBounds, gammaBounds, betaBounds2, ]
             )
             self.optimizer = optimal
             beta, gamma, beta2 = optimal.x
-            print("Beta:{beta} Beta2: {beta2} Gamma:{gamma}".format(beta=beta, gamma=gamma, beta2=beta2))
+            if verbose:
+                print("Beta:{beta} Beta2: {beta2} Gamma:{gamma}".format(beta=beta, gamma=gamma, beta2=beta2))
             self.beta = beta
             self.gamma = gamma
             self.beta2 = beta2
@@ -163,19 +175,89 @@ class SIR(object):
             )
             self.optimizer = optimal
             beta, gamma, = optimal.x
-            print("Beta:{beta} Gamma:{gamma}".format(beta=beta, gamma=gamma, ))
+            if verbose:
+                print("Beta:{beta} Gamma:{gamma}".format(beta=beta, gamma=gamma, ))
             self.beta = beta
             self.gamma = gamma
             self.params = [self.beta, self.gamma,]
 
         self.R0 = self.beta / self.gamma
-        print('R0:{R0}'.format(R0=self.R0))
+        if verbose:
+            print('R0:{R0}'.format(R0=self.R0))
+
+    def S0estimate(self, verbose=True):
+
+        self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
+
+        if not self.forcedBeta:
+            betaBounds = self.betaBounds
+        else:
+            betaBounds = (self.forcedBeta, self.forcedBeta)
+
+        if not self.forcedGamma:
+            gammaBounds = self.gammaBounds
+        else:
+            gammaBounds = (self.forcedGamma, self.forcedGamma)
+
+        S0bounds = self.S0bounds
+
+        optimal = minimize(
+            self.lossS0,
+            [0.2, 0.07, 1e5],
+            args=(),
+            method='L-BFGS-B',
+            # options={'maxiter' : 5},
+            # method='TNC',
+            bounds=[betaBounds, gammaBounds, S0bounds]
+        )
+        self.optimizer = optimal
+        beta, gamma, S_0 = optimal.x
+        if verbose:
+            print("Beta:{beta} Gamma:{gamma}".format(beta=beta, gamma=gamma, ))
+        self.beta = beta
+        self.gamma = gamma
+        self.S_0 = S_0
+
+        self.R0 = self.beta / self.gamma
+        if verbose:
+            print('R0:{R0}'.format(R0=self.R0))
+
+    def lossS0(self, point):
+        """
+        RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
+        """
+        size = self.I_actual.shape[0]
+        beta, gamma, S_0 = point
+        beta2 = beta
+
+
+        def SIR(t, y):
+            S = y[0]
+            I = y[1]
+            R = y[2]
+
+            if t < self.quarantine_loc:
+                ret = [-beta * S * I / self.N, beta * S * I / self.N - gamma * I, gamma * I]
+            else:
+                ret = [-beta2 * S * I / self.N, beta2 * S * I / self.N - gamma * I, gamma * I]
+            return ret
+
+        solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
+
+        # Put more emphasis on recovered people
+        alpha = self.alpha
+
+        l1 = np.sqrt(np.mean((solution.y[1] - self.I_actual) ** 2))
+        l2 = np.sqrt(np.mean((solution.y[2] - self.R_actual) ** 2))
+
+        return alpha * l1 + (1 - alpha) * l2
+
 
     def loss(self, point):
         """
         RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
         """
-        size = self.confirmed.shape[0]
+        size = self.I_actual.shape[0]
         if self.estimateBeta2:
             beta, gamma, beta2, = point
         else:
@@ -203,7 +285,7 @@ class SIR(object):
 
         return alpha * l1 + (1 - alpha) * l2
 
-    def predict(self, beta=None, gamma=None):
+    def predict(self, beta=None, gamma=None, useData = True):
         """
         Predict how the number of people in each compartment can be changed through time toward the future.
         The model is formulated with the given beta and gamma.
@@ -231,7 +313,6 @@ class SIR(object):
 
         # print(self.confirmed.index)
         new_index = self.extend_index(self.confirmed.index, predict_range)
-        # print(new_index) #AQUI JA ESTA ERRADO
 
         size = len(new_index)
 
@@ -339,12 +420,15 @@ class SIR(object):
         self.df = df
         print("Predicting with Beta:{beta} Beta2: {beta2} Gamma:{gamma}".format(beta=beta, gamma=gamma, beta2=beta2))
 
-    def train(self):
+    def train(self,):
         """
         Run the optimization to estimate the beta and gamma fitting the given confirmed cases.
         """
 
-        self.estimate()
+        if self.estimateS0:
+            self.S0estimate()
+        else:
+            self.estimate()
 
         self.predict()
 
@@ -354,12 +438,30 @@ class SIR(object):
         # fig.savefig(f"{self.country}.png")
 
     def calculateNB(self):
+        # Need of Beds
         #X% of new cases need hospitalization after n days
         #First tryout is right after new cases bluntly after n days
-        self.df['hospDemand'] = ((self.df['S'].shift(1) - self.df['S']) * self.hospRate).shift(self.daysToHosp)
-        self.df['hospExpire'] = - self.df['hospDemand'].shift(self.daysToLeave)
-        self.df['H'] = self.df['hospDemand'] - self.df['hospExpire']
+        self.df['hospDemand'] = ((self.df['S'].shift(1) - self.df['S']) * self.hospRate).shift(self.daysToHosp).copy()
+        self.df['hospExpire'] = self.df['hospDemand'].shift(self.daysToLeave).copy()
+        self.df['H'] = (self.df['hospDemand'].cumsum() - self.df['hospExpire'].cumsum()).copy()
         self.df.drop(['hospDemand', 'hospExpire'], axis=1, inplace=True)
+
+    def rollingBetas(self):
+
+        betasList = []
+        gammasList = []
+        I_actual = self.I_actual.copy()
+        R_actual = self.R_actual.copy()
+        for date in self.confirmed.index:
+            self.I_actual = I_actual.loc[:date]
+            self.R_actual = R_actual.loc[:date]
+            self.estimate(verbose=False)
+            betasList.append(self.beta)
+            gammasList.append(self.gamma)
+
+        self.rollingList = pd.DataFrame({'beta': betasList, 'gamma': gammasList})
+        self.rollingList.index = self.I_actual.index
+        return self.rollingList
 
 ############## VISUALIZATION METHODS ################
     def I_fit_plot(self):
@@ -371,8 +473,23 @@ class SIR(object):
     def main_plot(self):
         fig, ax = plt.subplots(figsize=(15, 10))
         ax.set_title(self.country)
-        self.df.plot(ax=ax)
+        line_styles ={
+            'I_Actual': '--',
+            'R_Actual': '--',
+        }
 
+        # color = {
+        #     'I_Actual': '#FF0000',
+        #     # 'R_Actual': '--',
+        # }
+
+        self.df.plot(ax=ax, style=line_styles, )
+
+    def rollingPlot(self):
+        axes = self.rollingList.plot()
+        fig = axes.get_figure()
+
+        axes.axvline(x=self.quarantineDate, color='red', linestyle='--', label='Quarentine')
 
 class SEIR(SIR):
     def __init__(self,
@@ -852,10 +969,28 @@ if __name__ == '__main__':
     #               )
     # jap.train()
 
-    jap = SEIR(country='Brazil',
-              N=200e6,
-              alpha=0.7,
-              betaBounds=(0.1, 0.3),
-              gammaBounds=(0.05, 0.1),
-              )
-    jap.train()
+    # jap = SEIR(country='Brazil',
+    #           N=200e6,
+    #           alpha=0.7,
+    #           betaBounds=(0.1, 0.3),
+    #           gammaBounds=(0.05, 0.1),
+    #           )
+    # jap.train()
+
+    t1 = SIR('Korea, South',
+             N=51e6,
+             # N=1e6,
+             alpha=1,
+             betaBounds=(0.1, 4.0),
+             gammaBounds=(0.05, 2.0),
+             nth=100,
+             hospRate=0.07,
+             daysToHosp=1,  # (after detection)
+             daysToLeave=12,
+             infectedAssumption=1,
+             # forcedBeta = 3,
+             # quarantineDate = dt.datetime(2020,3,16), #italy lockdown was on the 9th
+             # estimateBeta2 = True
+             )
+
+    t1.rollingBetas()
