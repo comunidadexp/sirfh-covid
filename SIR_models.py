@@ -237,7 +237,7 @@ class SIR(object):
         self.beta_model = beta
         self.gamma_model = gamma
 
-        solution = solve_ivp(SIR, [0, size], [self.S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
+        solution = solve_ivp(self.SIR_model, [0, size], [self.S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
 
         # Put more emphasis on recovered people
         alpha = self.alpha
@@ -266,17 +266,12 @@ class SIR(object):
 
         size = len(new_index)
 
-        def SIR(t, y):
-            S = y[0]
-            I = y[1]
-            R = y[2]
-
-            ret = [-beta * S * I / self.N, beta * S * I / self.N - gamma * I, gamma * I]
-            return ret
+        self.beta_model = beta
+        self.gamma_model = gamma
 
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
 
-        prediction = solve_ivp(SIR, [0, size], [self.S_0, self.I_0, self.R_0],
+        prediction = solve_ivp(self.SIR_model, [0, size], [self.S_0, self.I_0, self.R_0],
                                                      t_eval=np.arange(0, size, 1))
 
         df = pd.DataFrame({
@@ -385,6 +380,12 @@ class SIR(object):
         fig = axes.get_figure()
 
         axes.axvline(x=self.quarantineDate, color='red', linestyle='--', label='Quarentine')
+
+# class SIRH(SIR):
+#     """
+#     This SIR extensions creates a differential equation for hospitalization
+#     """
+
 
 class SEIR(SIR):
     def __init__(self,
