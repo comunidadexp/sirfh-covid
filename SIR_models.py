@@ -16,24 +16,19 @@ class SIR(object):
                  recoveredAssumption=1,
                  nth=1,
                  daysPredict=150,
-                 estimateBeta2 = False,
-                 estimateBeta3 = False,
-                 estimateS0 = False,
-                 quarantineDate = None,
-                 backDate = dt.datetime(2020, 4, 22),
+                 estimateS0=False,
+                 quarantineDate=None,
                  alpha=0.5,
-                 forcedBeta = None,
-                 forcedBeta2 = None,
-                 forcedGamma = None,
-                 log = False,
-                 betaBounds = (0.00000001, 2.0),
+                 forcedBeta=None,
+                 forcedGamma=None,
+                 betaBounds=(0.00000001, 2.0),
                  gammaBounds=(0.00000001, 2.0),
-                 S0bounds = (10000, 10e6),
-                 R0bounds =     None,
-                 hospRate = 0.15,
-                 daysToHosp = 7,
-                 daysToLeave = 7,
-                 opt = 'L-BFGS-B'
+                 S0bounds=(10000, 10e6),
+                 R0bounds=None,
+                 hospRate=0.15,
+                 daysToHosp=7,
+                 daysToLeave=7,
+                 opt='L-BFGS-B'
                  ):
 
         self.country = country
@@ -43,15 +38,10 @@ class SIR(object):
         self.nth = nth  # minimum number of cases to start modelling
         self.daysPredict = daysPredict
         self.quarantineDate = quarantineDate
-        self.backDate = backDate
-        self.estimateBeta2 = estimateBeta2
-        self.estimateBeta3 = estimateBeta3
         self.estimateS0 = estimateS0
         self.alpha = alpha
         self.forcedBeta = forcedBeta
-        self.forcedBeta2 = forcedBeta2
         self.forcedGamma = forcedGamma
-        self.log = log
         self.betaBounds = betaBounds
         self.gammaBounds = gammaBounds
         self.S0bounds = S0bounds
@@ -83,11 +73,6 @@ class SIR(object):
         recovered = recovered.drop(recovered.columns[[0, 2, 3]], axis=1).set_index('Country/Region').T
         recovered.index = pd.to_datetime(recovered.index)
         self.recovered = recovered[self.country]
-
-        if self.log:
-            self.confirmed = self.confirmed.transform(np.log)
-            self.fatal = self.confirmed.transform(np.log)
-            self.recovered = self.confirmed.transform(np.log)
 
     def load_data(self):
         """
@@ -139,53 +124,29 @@ class SIR(object):
         else:
             betaBounds = (self.forcedBeta, self.forcedBeta)
 
-        if not self.forcedBeta2:
-            betaBounds2 = self.betaBounds
-        else:
-            betaBounds2 = (self.forcedBeta2, self.forcedBeta2)
-
         if not self.forcedGamma:
             gammaBounds = self.gammaBounds
         else:
             gammaBounds = (self.forcedGamma, self.forcedGamma)
 
-        if self.estimateBeta2:
-            optimal = minimize(
-                self.loss,
-                [0.2, 0.07, 0.2],
-                args=(),
-                method=self.opt,
-                # options={'maxiter' : 5},
-                # method='TNC',
-                bounds=[betaBounds, gammaBounds, betaBounds2, ]
-            )
-            self.optimizer = optimal
-            beta, gamma, beta2 = optimal.x
-            if verbose:
-                print("Beta:{beta} Beta2: {beta2} Gamma:{gamma}".format(beta=beta, gamma=gamma, beta2=beta2))
-            self.beta = beta
-            self.gamma = gamma
-            self.beta2 = beta2
-            self.params =[self.beta, self.gamma, self.beta2]
-        else:
-            optimal = minimize(
-                self.loss,
-                [0.2, 0.07,],
-                args=(),
-                method=self.opt,
-                # options={'maxiter' : 5},
-                # method='TNC',
-                bounds=[betaBounds, gammaBounds, ]
-            )
-            self.optimizer = optimal
-            beta, gamma, = optimal.x
-            if verbose:
-                print("Beta:{beta} Gamma:{gamma}".format(beta=beta, gamma=gamma, ))
-            self.beta = beta
-            self.gamma = gamma
-            self.params = [self.beta, self.gamma,]
+        optimal = minimize(
+            self.loss,
+            [0.2, 0.07, ],
+            args=(),
+            method=self.opt,
+            # options={'maxiter' : 5},
+            # method='TNC',
+            bounds=[betaBounds, gammaBounds, ]
+        )
+        self.optimizer = optimal
+        beta, gamma, = optimal.x
+        if verbose:
+            print("Beta:{beta} Gamma:{gamma}".format(beta=beta, gamma=gamma, ))
+        self.beta = beta
+        self.gamma = gamma
 
         self.R0 = self.beta / self.gamma
+
         if verbose:
             print('R0:{R0}'.format(R0=self.R0))
 
@@ -243,7 +204,6 @@ class SIR(object):
         """
         size = self.I_actual.shape[0]
         beta, gamma, S_0 = point
-        beta2 = beta
 
 
         def SIR(t, y):
@@ -251,10 +211,7 @@ class SIR(object):
             I = y[1]
             R = y[2]
 
-            if t < self.quarantine_loc:
-                ret = [-beta * S * I / self.N, beta * S * I / self.N - gamma * I, gamma * I]
-            else:
-                ret = [-beta2 * S * I / self.N, beta2 * S * I / self.N - gamma * I, gamma * I]
+            ret = [-beta * S * I / self.N, beta * S * I / self.N - gamma * I, gamma * I]
             return ret
 
         solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
@@ -272,21 +229,16 @@ class SIR(object):
         RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
         """
         size = self.I_actual.shape[0]
-        if self.estimateBeta2:
-            beta, gamma, beta2, = point
-        else:
-            beta, gamma, = point
-            beta2=beta
+
+        beta, gamma, = point
+
 
         def SIR(t, y):
             S = y[0]
             I = y[1]
             R = y[2]
 
-            if t < self.quarantine_loc:
-                ret = [-beta * S * I / self.N, beta * S * I / self.N - gamma * I, gamma * I]
-            else:
-                ret = [-beta2 * S * I / self.N, beta2 * S * I / self.N - gamma * I, gamma * I]
+            ret = [-beta * S * I / self.N, beta * S * I / self.N - gamma * I, gamma * I]
             return ret
 
         solution = solve_ivp(SIR, [0, size], [self.S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
@@ -311,18 +263,6 @@ class SIR(object):
         if not gamma:
             gamma = self.gamma
 
-
-        if self.estimateBeta2:
-            beta2 = self.beta2
-        else:
-            beta2 = beta
-
-        if self.estimateBeta3:
-            # beta3 = self.beta2
-            beta3 = (self.beta2 + self.beta) / 2
-        else:
-            beta3 = beta
-
         predict_range = self.daysPredict
 
         # print(self.confirmed.index)
@@ -335,18 +275,10 @@ class SIR(object):
             I = y[1]
             R = y[2]
 
-            if t < self.quarantine_loc:
-                ret = [-beta * S * I / self.N, beta * S * I / self.N - gamma * I, gamma * I]
-            elif t < self.back_loc:
-                ret = [-beta3 * S * I / self.N, beta3 * S * I / self.N - gamma * I, gamma * I]
-            else:
-                ret = [-beta2 * S * I / self.N, beta2 * S * I / self.N - gamma * I, gamma * I]
+            ret = [-beta * S * I / self.N, beta * S * I / self.N - gamma * I, gamma * I]
             return ret
 
-        # print(self.backDate)
-        # print(new_index.get_loc(self.backDate))
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
-        self.back_loc = float(new_index.get_loc(self.backDate))
 
         prediction = solve_ivp(SIR, [0, size], [self.S_0, self.I_0, self.R_0],
                                                      t_eval=np.arange(0, size, 1))
@@ -359,80 +291,9 @@ class SIR(object):
             'R': prediction.y[2]
         }, index=new_index)
 
-        # if self.log:
-        #     df = df.transform(np.exp)
-
         self.df = df
         self.calculateNB()
-        print("Predicting with Beta:{beta} Beta2: {beta2} Gamma:{gamma}".format(beta=beta, gamma=gamma, beta2=beta2))
-
-    def predict_linear(self, beta=None, gamma=None):
-        """
-        Predict how the number of people in each compartment can be changed through time toward the future.
-        The model is formulated with the given beta and gamma.
-        """
-
-        #In case predict function is called with custom parameters
-        if not beta:
-            beta = self.beta
-        if not gamma:
-            gamma = self.gamma
-
-
-        if self.estimateBeta2:
-            beta2 = self.beta2
-        else:
-            beta2 = beta
-
-        if self.estimateBeta3:
-            # beta3 = self.beta2
-            beta3 = (self.beta2 + self.beta) / 2
-        else:
-            beta3 = beta
-
-        predict_range = self.daysPredict
-
-        # print(self.confirmed.index)
-        new_index = self.extend_index(self.confirmed.index, predict_range)
-        # print(new_index) #AQUI JA ESTA ERRADO
-
-        size = len(new_index)
-
-        def SIR(t, y):
-            S = y[0]
-            I = y[1]
-            R = y[2]
-
-            if t < self.quarantine_loc:
-                ret = [(-beta * S * I / self.N) + S, (beta * S * I / self.N - gamma * I) + I, (gamma * I) + R]
-            elif t < self.back_loc:
-                ret = [(-beta3 * S * I / self.N) + S, (beta3 * S * I / self.N - gamma * I) + I, (gamma * I) + R]
-            else:
-                ret = [(-beta2 * S * I / self.N) + S, (beta2 * S * I / self.N - gamma * I) + I, (gamma * I) + R]
-            return ret
-
-        # print(self.backDate)
-        # print(new_index.get_loc(self.backDate))
-        self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
-        self.back_loc = float(new_index.get_loc(self.backDate))
-
-        #prediction = solve_ivp(SIR, [0, size], [self.S_0, self.I_0, self.R_0],t_eval=np.arange(0, size, 1))
-        prediction = np.empty((size, 3))
-        prediction[0, :] = [self.S_0, self.I_0, self.R_0]
-
-        for t in range(1, size):
-            prediction[t, :] = SIR(t, prediction[t-1, :])
-
-
-        df = pd.DataFrame({
-            'I_Actual': self.I_actual.reindex(new_index),
-            'R_Actual': self.R_actual.reindex(new_index),
-            'S': prediction[:, 0],
-            'I': prediction[:, 1],
-            'R': prediction[:, 2]
-        }, index=new_index)
-        self.df = df
-        print("Predicting with Beta:{beta} Beta2: {beta2} Gamma:{gamma}".format(beta=beta, gamma=gamma, beta2=beta2))
+        print("Predicting with Beta:{beta} Gamma:{gamma}".format(beta=beta, gamma=gamma, ))
 
     def train(self,):
         """
@@ -445,11 +306,6 @@ class SIR(object):
             self.estimate()
 
         self.predict()
-
-        # fig, ax = plt.subplots(figsize=(15, 10))
-        # ax.set_title(self.country)
-        # self.df.plot(ax=ax)
-        # fig.savefig(f"{self.country}.png")
 
     def calculateNB(self):
         # Need of Beds
@@ -505,7 +361,6 @@ class SIR(object):
         }
 
         self.df[['I_Actual', 'I']].loc[:self.end_data].plot(style=line_styles)
-
 
     def R_fit_plot(self):
         line_styles = {
