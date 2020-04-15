@@ -198,6 +198,15 @@ class SIR(object):
         if verbose:
             print('R0:{R0}'.format(R0=self.R0))
 
+    def SIR_model(self,t,y):
+        S = y[0]
+        I = y[1]
+        R = y[2]
+
+        ret = [-self.beta_model * S * I / self.N, self.beta_model * S * I / self.N - self.gamma_model * I,
+               self.gamma_model * I]
+        return ret
+
     def lossS0(self, point):
         """
         RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
@@ -205,16 +214,11 @@ class SIR(object):
         size = self.I_actual.shape[0]
         beta, gamma, S_0 = point
 
+        self.beta_model = beta
+        self.gamma_model = gamma
 
-        def SIR(t, y):
-            S = y[0]
-            I = y[1]
-            R = y[2]
-
-            ret = [-beta * S * I / self.N, beta * S * I / self.N - gamma * I, gamma * I]
-            return ret
-
-        solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
+        # solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
+        solution = solve_ivp(self.SIR_model, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
 
         # Put more emphasis on recovered people
         alpha = self.alpha
@@ -229,17 +233,9 @@ class SIR(object):
         RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
         """
         size = self.I_actual.shape[0]
-
         beta, gamma, = point
-
-
-        def SIR(t, y):
-            S = y[0]
-            I = y[1]
-            R = y[2]
-
-            ret = [-beta * S * I / self.N, beta * S * I / self.N - gamma * I, gamma * I]
-            return ret
+        self.beta_model = beta
+        self.gamma_model = gamma
 
         solution = solve_ivp(SIR, [0, size], [self.S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
 
@@ -880,19 +876,21 @@ if __name__ == '__main__':
              N=1e6,
              # N=1e6,
              alpha=.7,
-             betaBounds=(0.1, 4.0),
+             betaBounds=(0.1, 1.5),
              gammaBounds=(0.05, 2.0),
-             S0bounds=(0.05e6, 200e6 * .12),
-             nth=1000,
-             hospRate=0.07,
-             daysToHosp=1,  # big for detction
+             S0bounds=(1e6, 200e6 * .12),
+             nth=100,
+             hospRate=0.10,
+             daysToHosp=4,  # big for detction
              daysToLeave=12,
              infectedAssumption=1,
              # forcedBeta = 3,
              # quarantineDate = dt.datetime(2020,3,16), #italy lockdown was on the 9th
              # estimateBeta2 = True
              estimateS0=True,
-             opt='SLSQP'
+             # opt='SLSQP',
+             R0bounds=None,
+
              )
 
     t1.train()
