@@ -499,10 +499,20 @@ class SIR(object):
 
 ############## VISUALIZATION METHODS ################
     def I_fit_plot(self):
-        self.df[['I_Actual', 'I']].loc[:self.end_data].plot()
+        line_styles = {
+            'I_Actual': '--',
+            'R_Actual': '--',
+        }
+
+        self.df[['I_Actual', 'I']].loc[:self.end_data].plot(style=line_styles)
+
 
     def R_fit_plot(self):
-        self.df[['R_Actual', 'R']].loc[:self.end_data].plot()
+        line_styles = {
+            'I_Actual': '--',
+            'R_Actual': '--',
+        }
+        self.df[['R_Actual', 'R']].loc[:self.end_data].plot(style=line_styles)
 
     def main_plot(self):
         fig, ax = plt.subplots(figsize=(15, 10))
