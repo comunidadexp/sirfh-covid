@@ -29,9 +29,11 @@ class SIR(object):
                  betaBounds = (0.00000001, 2.0),
                  gammaBounds=(0.00000001, 2.0),
                  S0bounds = (10000, 10e6),
+                 R0bounds =     None,
                  hospRate = 0.15,
                  daysToHosp = 7,
                  daysToLeave = 7,
+                 opt = 'L-BFGS-B'
                  ):
 
         self.country = country
@@ -56,6 +58,8 @@ class SIR(object):
         self.hospRate = hospRate
         self.daysToHosp = daysToHosp
         self.daysToLeave = daysToLeave
+        self.opt = opt
+        self.R0bounds = R0bounds
 
         self.load_data()
 
@@ -150,7 +154,7 @@ class SIR(object):
                 self.loss,
                 [0.2, 0.07, 0.2],
                 args=(),
-                method='L-BFGS-B',
+                method=self.opt,
                 # options={'maxiter' : 5},
                 # method='TNC',
                 bounds=[betaBounds, gammaBounds, betaBounds2, ]
@@ -168,7 +172,7 @@ class SIR(object):
                 self.loss,
                 [0.2, 0.07,],
                 args=(),
-                method='L-BFGS-B',
+                method=self.opt,
                 # options={'maxiter' : 5},
                 # method='TNC',
                 bounds=[betaBounds, gammaBounds, ]
@@ -201,19 +205,30 @@ class SIR(object):
 
         S0bounds = self.S0bounds
 
+        if self.R0bounds:
+            constraints = [
+                {'type': 'ineq', 'fun': self.const_lowerBoundR0_S0opt},
+                {'type': 'ineq', 'fun': self.const_upperBoundR0_S0opt},
+            ]
+            self.opt = 'SLSQP'
+        else:
+            constraints = None
+
+
         optimal = minimize(
             self.lossS0,
             [0.2, 0.07, 1e5],
             args=(),
-            method='L-BFGS-B',
+            method=self.opt,
             # options={'maxiter' : 5},
             # method='TNC',
-            bounds=[betaBounds, gammaBounds, S0bounds]
+            bounds=[betaBounds, gammaBounds, S0bounds],
+            constraints=constraints
         )
         self.optimizer = optimal
         beta, gamma, S_0 = optimal.x
         if verbose:
-            print("Beta:{beta} Gamma:{gamma}".format(beta=beta, gamma=gamma, ))
+            print("Beta:{beta} Gamma:{gamma} S_0:{S_0}".format(beta=beta, gamma=gamma, S_0=S_0))
         self.beta = beta
         self.gamma = gamma
         self.S_0 = S_0
@@ -251,7 +266,6 @@ class SIR(object):
         l2 = np.sqrt(np.mean((solution.y[2] - self.R_actual) ** 2))
 
         return alpha * l1 + (1 - alpha) * l2
-
 
     def loss(self, point):
         """
@@ -462,6 +476,26 @@ class SIR(object):
         self.rollingList = pd.DataFrame({'beta': betasList, 'gamma': gammasList})
         self.rollingList.index = self.I_actual.index
         return self.rollingList
+
+############## CONSTRAINT METHODS ################
+
+    def const_lowerBoundR0_S0opt(self, point):
+        "constraint has to be R0 > bounds(0) value, thus (R0 - bound) > 0"
+        # self.const_lowerBoundR0_S0opt.__code__.co_varnames
+        # print(**kwargs)
+        # print(locals())
+        beta, gamma, S_0 = point
+        lowerBound = self.R0bounds[0]
+        return (beta/gamma) - lowerBound
+
+    def const_upperBoundR0_S0opt(self, point):
+        # print(locals())
+        # print(**kwargs)
+        # self.const_upperBoundR0_S0opt.__code__.co_varnames
+        beta, gamma, S_0 = point
+        upperBound = self.R0bounds[0]
+        return upperBound - (beta/gamma)
+
 
 ############## VISUALIZATION METHODS ################
     def I_fit_plot(self):
@@ -977,20 +1011,23 @@ if __name__ == '__main__':
     #           )
     # jap.train()
 
-    t1 = SIR('Korea, South',
-             N=51e6,
+    t1 = SIR('Brazil',
+             N=1e6,
              # N=1e6,
-             alpha=1,
+             alpha=.7,
              betaBounds=(0.1, 4.0),
              gammaBounds=(0.05, 2.0),
-             nth=100,
+             S0bounds=(0.05e6, 200e6 * .12),
+             nth=1000,
              hospRate=0.07,
-             daysToHosp=1,  # (after detection)
+             daysToHosp=1,  # big for detction
              daysToLeave=12,
              infectedAssumption=1,
              # forcedBeta = 3,
              # quarantineDate = dt.datetime(2020,3,16), #italy lockdown was on the 9th
              # estimateBeta2 = True
+             estimateS0=True,
+             opt='SLSQP'
              )
 
-    t1.rollingBetas()
+    t1.train()
