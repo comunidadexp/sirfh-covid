@@ -28,7 +28,8 @@ class SIR(object):
                  hospRate=0.15,
                  daysToHosp=7,
                  daysToLeave=7,
-                 opt='L-BFGS-B'
+                 opt='L-BFGS-B',
+                 adjust_recovered=False
                  ):
 
         self.country = country
@@ -47,9 +48,10 @@ class SIR(object):
         self.S0bounds = S0bounds
         self.hospRate = hospRate
         self.daysToHosp = daysToHosp
-        self.daysToLeave = daysToLeave
+        self.hospitalDuration = daysToLeave
         self.opt = opt
         self.R0bounds = R0bounds
+        self.adjust_recovered = adjust_recovered
 
         self.load_data()
 
@@ -80,6 +82,10 @@ class SIR(object):
         """
         self.load_CSSE()
 
+        # Adjust recovered curve
+        if self.adjust_recovered:
+            self.recovered = self.smoothCurve(self.recovered)
+
         # Using unreported estimate
         self.confirmed = self.confirmed * self.infectedAssumption
         self.recovered = self.recovered * self.infectedAssumption * self.recoveredAssumption
@@ -88,7 +94,7 @@ class SIR(object):
         nth_index = self.confirmed[self.confirmed >= self.nth].index[0]
 
         if not self.quarantineDate:
-            self.quarantineDate=self.confirmed.index[-1]
+            self.quarantineDate = self.confirmed.index[-1]
         quarantine_index = pd.Series(False, index=self.confirmed.index)
         quarantine_index[quarantine_index.index >= self.quarantineDate] = True
 
@@ -102,6 +108,12 @@ class SIR(object):
         #True data series
         self.R_actual = self.fatal + self.recovered
         self.I_actual = self.confirmed - self.R_actual
+
+    def smoothCurve(self, df):
+        df[df.diff() <= 0] = np.nan
+        # df.loc[dt.datetime(2020, 4, 9)] = np.nan
+        df.interpolate('linear', inplace=True)
+        return df
 
     def initialize_parameters(self):
         self.R_0 = self.recovered[0] + self.fatal[0]
@@ -198,7 +210,7 @@ class SIR(object):
         if verbose:
             print('R0:{R0}'.format(R0=self.R0))
 
-    def SIR_model(self,t,y):
+    def model(self, t, y):
         S = y[0]
         I = y[1]
         R = y[2]
@@ -218,7 +230,7 @@ class SIR(object):
         self.gamma_model = gamma
 
         # solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
-        solution = solve_ivp(self.SIR_model, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
+        solution = solve_ivp(self.model, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
 
         # Put more emphasis on recovered people
         alpha = self.alpha
@@ -237,7 +249,7 @@ class SIR(object):
         self.beta_model = beta
         self.gamma_model = gamma
 
-        solution = solve_ivp(self.SIR_model, [0, size], [self.S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
+        solution = solve_ivp(self.model, [0, size], [self.S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
 
         # Put more emphasis on recovered people
         alpha = self.alpha
@@ -271,8 +283,8 @@ class SIR(object):
 
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
 
-        prediction = solve_ivp(self.SIR_model, [0, size], [self.S_0, self.I_0, self.R_0],
-                                                     t_eval=np.arange(0, size, 1))
+        prediction = solve_ivp(self.model, [0, size], [self.S_0, self.I_0, self.R_0],
+                               t_eval=np.arange(0, size, 1))
 
         df = pd.DataFrame({
             'I_Actual': self.I_actual.reindex(new_index),
@@ -303,7 +315,7 @@ class SIR(object):
         #X% of new cases need hospitalization after n days
         #First tryout is right after new cases bluntly after n days
         self.df['hospDemand'] = ((self.df['S'].shift(1) - self.df['S']) * self.hospRate).shift(self.daysToHosp).copy()
-        self.df['hospExpire'] = self.df['hospDemand'].shift(self.daysToLeave).copy()
+        self.df['hospExpire'] = self.df['hospDemand'].shift(self.hospitalDuration).copy()
         self.df['H'] = (self.df['hospDemand'].cumsum() - self.df['hospExpire'].cumsum()).copy()
         self.df.drop(['hospDemand', 'hospExpire'], axis=1, inplace=True)
 
@@ -381,10 +393,330 @@ class SIR(object):
 
         axes.axvline(x=self.quarantineDate, color='red', linestyle='--', label='Quarentine')
 
-# class SIRH(SIR):
-#     """
-#     This SIR extensions creates a differential equation for hospitalization
-#     """
+class SIHRF(SIR):
+    """
+    This SIR extension split the infected compartiment into non-hospital and hospital cases and the recovered group
+    into recovered and fatal
+
+    $$\frac{dS}{dt} = - \frac{\beta IS}{N}$$
+
+    $$\frac{dIN}{dt} = (1 - \rho) \times \frac{\beta IS}{N} - \gamma_{IN} IN$$
+
+    $$\frac{dIH}{dt} = \rho \times \frac{\beta IS}{N} - (1-\delta) \times \gamma_{IH} IH - \delta \times \omega_{IH} IH$$
+
+
+    $$\frac{dR}{dt} = \gamma_{IN} IN + (1-\delta) \times \gamma_{IH} IH $$
+
+    $$\frac{dF}{dt} = \delta \times \omega_{IH} IH$$
+    """
+    def __init__(self,
+                 gamma_i_bounds=(1/(3*7), 1/(2*7)),
+                 gamma_h_bounds=(1/(6*7), 1/(2*7)),
+                 omega_bounds=(0.001, 0.1),
+                 delta_bounds=(0, 1),
+                 alphas=(1/3, 1/3, 1/3),
+
+                 **kwargs):
+        self.gamma_i_bounds = gamma_i_bounds
+        self.gamma_h_bounds = gamma_h_bounds
+        self.omega_bounds = omega_bounds
+        self.delta_bounds = delta_bounds
+        self.alphas = alphas
+
+        self.rho = kwargs['hospRate']
+        super().__init__(**kwargs)
+
+
+    def model(self, t, y):
+        S = y[0]
+        I = y[1]
+        H = y[2]
+        R = y[3]
+        F = y[4]
+
+        ret = [
+            # S
+            -self.beta_model * S * I / self.N,
+
+            # I
+            (1 - self.rho) * self.beta_model * S * I / self.N  # (1-rho) BIS/N
+            - self.gamma_I_model * I,  # Gamma_I x I
+
+            # H
+            self.rho * self.beta_model * S * I / self.N  # rho BIS/N
+            - (1 - self.delta_model) * self.gamma_H_model * H  # - (1-delta) gamma_H H
+            - self.delta_model * self.omega_model * H,  # - delta omega H,
+
+            # R
+            self.gamma_I_model * I  # gamma_I * I
+            + (1 - self.delta_model) * self.gamma_H_model * H,  # (1-delta) gamma_H * H
+
+            # F
+            self.delta_model * self.omega_model * H,
+        ]
+
+        return ret
+
+    def load_data(self):
+        """
+        New function to use our prop data
+        """
+        super().load_data()
+
+        #True data series
+        self.R_actual = self.recovered
+        self.F_actual = self.fatal
+        self.I_actual = self.confirmed - self.R_actual - self.F_actual  # obs this is total I
+
+    def S0estimate(self, verbose=True):
+        """
+        List of parameters to estimate:
+        * beta
+        * gamma I
+        * gamma H
+        * omega
+        * S0
+        * delta
+        * maybe I0 has to be initialized or estimated
+
+        Note: gamma bounds are applied to total gamma (gamma_I + (1-delta) gamma_H + delta omega)
+        """
+        self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
+        betaBounds = self.betaBounds
+        S0bounds = self.S0bounds
+        gamma_i_bounds = self.gamma_i_bounds
+        gamma_h_bounds = self.gamma_h_bounds
+        omega_bounds = self.omega_bounds
+        genericGammaBounds = (0.001, 0.2)
+        deltaBounds = self.delta_bounds
+
+        constraints = [
+            {'type': 'ineq', 'fun': self.const_lowerBound_R0},
+            {'type': 'ineq', 'fun': self.const_upperBound_R0},
+            {'type': 'ineq', 'fun': self.const_lowerBound_gamma},
+            {'type': 'ineq', 'fun': self.const_upperBound_gamma},
+        ]
+
+
+        optimal = minimize(
+            self.loss,
+            np.array([
+                0.2,  # beta
+                .07,  # gamma I
+                0.07,  # gamma H
+                0.07,  # omega
+                1e6,  # S0
+                0.05,  # delta
+            ]),
+            args=(),
+            method='SLSQP',
+            bounds=[
+                betaBounds,
+                # genericGammaBounds,
+                # genericGammaBounds,
+                # genericGammaBounds,
+                gamma_i_bounds,
+                gamma_h_bounds,
+                omega_bounds,
+                S0bounds,
+                deltaBounds,
+
+            ],
+            constraints=constraints,
+        )
+        self.optimizer = optimal
+        beta, gamma_I, gamma_H, omega, S_0, delta = optimal.x
+        gamma = gamma_I + (1 - delta) * gamma_H + delta * omega
+
+        if verbose:
+            print("Beta:{beta} Gamma:{gamma} S_0:{S_0}".format(beta=beta, gamma=gamma, S_0=S_0))
+            print("Beta:{value} ".format(value=beta,))
+            print("Gamma:{value} ".format(value=gamma, ))
+            print("Gamma I:{value} ".format(value=gamma_I, ))
+            print("Gamma H:{value} ".format(value=gamma_H, ))
+            print("Omega:{value} ".format(value=omega, ))
+            print("S0:{value} ".format(value=S_0, ))
+            print("Delta:{value} ".format(value=delta, ))
+
+        self.beta = beta
+        self.gamma = gamma
+        self.S_0 = S_0
+        self.gamma = gamma
+        self.gamma_I = gamma_I
+        self.gamma_H = gamma_H
+        self.omega = omega
+        self.delta = delta
+        self.R0 = self.beta / self.gamma
+        if verbose:
+            print('R0:{R0}'.format(R0=self.R0))
+
+    def initialize_parameters(self):
+        self.R_0 = self.recovered[0]
+        self.F_0 = self.fatal[0]
+        self.I_0 = self.confirmed.iloc[0] - self.R_0 - self.F_0
+        # self.S_0 = self.N - self.R_0 - self.I_0 - self.F_0
+        self.H_0 = self.I_0 * self.rho
+        self.I_0 = self.I_0 * (1 - self.rho)
+
+    def loss(self, point):
+        """
+        RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
+        """
+        size = self.I_actual.shape[0]
+        beta, gamma_I, gamma_H, omega, S_0, delta = point
+
+        gamma = gamma_I + (1 - delta) * gamma_H + delta * omega
+
+        self.gamma_model = gamma
+        self.beta_model = beta
+        self.gamma_I_model = gamma_I
+        self.gamma_H_model = gamma_H
+        self.omega_model = omega
+        self.delta_model = delta
+
+        # solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
+        solution = solve_ivp(self.model, [0, size], [S_0, self.I_0, self.H_0, self.R_0, self.F_0],
+                             t_eval=np.arange(0, size, 1), vectorized=True)
+
+        # Put more emphasis on recovered people
+        alphas = self.alphas
+
+        l1 = np.sqrt(np.mean(((solution.y[1] + solution.y[2]) - self.I_actual) ** 2))  # note that I_actual is I + H
+        l2 = np.sqrt(np.mean((solution.y[3] - self.R_actual) ** 2))
+        l3 = np.sqrt(np.mean((solution.y[4] - self.F_actual) ** 2))
+
+        return alphas[0] * l1 + alphas[1] * l2 + alphas[2] * l3
+
+    def predict(self,):
+        """
+        Predict how the number of people in each compartment can be changed through time toward the future.
+        The model is formulated with the given beta and gamma.
+        """
+
+        predict_range = self.daysPredict
+
+        # print(self.confirmed.index)
+        new_index = self.extend_index(self.confirmed.index, predict_range)
+
+        size = len(new_index)
+
+        self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
+
+        prediction = solve_ivp(self.model, [0, size], [self.S_0, self.I_0, self.H_0, self.R_0, self.F_0],
+                             t_eval=np.arange(0, size, 1), vectorized=True)
+
+        df = pd.DataFrame({
+            'I_Actual': self.I_actual.reindex(new_index),
+            'R_Actual': self.R_actual.reindex(new_index),
+            'F_Actual': self.F_actual.reindex(new_index),
+            'S': prediction.y[0],
+            'IN': prediction.y[1],
+            'H': prediction.y[2],
+            'R': prediction.y[3],
+            'F': prediction.y[4],
+            'I': prediction.y[1] + prediction.y[2]
+        }, index=new_index)
+
+        self.df = df
+############## VISUALIZATION METHODS ################
+    def main_plot(self):
+        fig, ax = plt.subplots(figsize=(15, 10))
+        ax.set_title(self.country)
+        line_styles ={
+            'I_Actual': '--',
+            'R_Actual': '--',
+            'F_Actual': '--',
+        }
+
+        # color = {
+        #     'I_Actual': '#FF0000',
+        #     # 'R_Actual': '--',
+        # }
+
+        self.df.plot(ax=ax, style=line_styles, )
+
+    def I_plot(self):
+        line_styles = {
+            'I_Actual': '--',
+            'R_Actual': '--',
+            'F_Actual': '--',
+        }
+
+        self.df[['I_Actual', 'I', 'IN', 'H']].loc[:self.end_data].plot(style=line_styles)
+
+    def H_F_plot(self):
+        line_styles = {
+            'I_Actual': '--',
+            'R_Actual': '--',
+            'F_Actual': '--',
+        }
+
+        self.df[['H', 'F', 'F_Actual',]].loc[:self.end_data].plot(style=line_styles)
+
+    def F_fit_plot(self):
+        line_styles = {
+            'I_Actual': '--',
+            'R_Actual': '--',
+            'F_Actual': '--',
+        }
+
+        self.df[['F_Actual', 'F']].loc[:self.end_data].plot(style=line_styles)
+
+    def actuals_plot(self):
+        line_styles = {
+            'I_Actual': '--',
+            'R_Actual': '--',
+            'F_Actual': '--',
+        }
+
+        self.df[['I_Actual', 'R_Actual', 'F_Actual']].loc[:self.end_data].plot(style=line_styles)
+
+############## CONSTRAINT METHODS ################
+
+    def const_lowerBound_gamma(self, point):
+        "constraint has to be R0 > bounds(0) value, thus (R0 - bound) > 0"
+
+        lowerBound = self.gammaBounds[0]
+
+        beta, gamma_I, gamma_H, omega, S0, delta = point
+
+        gamma = gamma_I + (1-delta) * gamma_H + delta * omega
+
+        return gamma - lowerBound
+
+    def const_upperBound_gamma(self, point):
+
+        upperBound = self.gammaBounds[1]
+
+        beta, gamma_I, gamma_H, omega, S0, delta = point
+
+        gamma = gamma_I + (1 - delta) * gamma_H + delta * omega
+
+        return upperBound - gamma
+
+    def const_lowerBound_R0(self, point):
+        "constraint has to be R0 > bounds(0) value, thus (R0 - bound) > 0"
+
+        lowerBound = self.R0bounds[0]
+
+        beta, gamma_I, gamma_H, omega, S0, delta = point
+
+        gamma = gamma_I + (1 - delta) * gamma_H + delta * omega
+        R0 = beta / gamma
+        return R0 - lowerBound
+
+    def const_upperBound_R0(self, point):
+
+        upperBound = self.R0bounds[1]
+
+        beta, gamma_I, gamma_H, omega, S0, delta = point
+
+        gamma = gamma_I + (1 - delta) * gamma_H + delta * omega
+        R0 = beta / gamma
+        return upperBound - R0
+
+
+
 
 
 class SEIR(SIR):
@@ -876,10 +1208,10 @@ if __name__ == '__main__':
     t1 = SIR('Brazil',
              N=1e6,
              # N=1e6,
-             alpha=.7,
+             alpha=1,
              betaBounds=(0.1, 1.5),
              gammaBounds=(0.05, 2.0),
-             S0bounds=(1e6, 200e6 * .12),
+             S0bounds=(200e6 * .01, 200e6 * .12),
              nth=100,
              hospRate=0.10,
              daysToHosp=4,  # big for detction
@@ -890,7 +1222,8 @@ if __name__ == '__main__':
              # estimateBeta2 = True
              estimateS0=True,
              # opt='SLSQP',
-             R0bounds=None,
+             R0bounds=(2.0, 3.0),
+             adjust_recovered=True,
 
              )
 
