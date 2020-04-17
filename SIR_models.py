@@ -11,7 +11,7 @@ import datetime as dt
 class SIR(object):
     def __init__(self,
                  country='Brazil',
-                 N = 200e6,
+                 N=200e6,
                  infectedAssumption=1,
                  recoveredAssumption=1,
                  nth=1,
@@ -20,7 +20,7 @@ class SIR(object):
                  alpha=0.5,
                  betaBounds=(0.00000001, 2.0),
                  gammaBounds=(0.00000001, 2.0),
-                 S0bounds=(10000, 10e6),
+                 S0pbounds=(10000, 10e6),
                  R0bounds=None,
                  hospRate=0.15,
                  daysToHosp=7,
@@ -33,13 +33,13 @@ class SIR(object):
         self.N = N
         self.infectedAssumption = infectedAssumption  # Multiplier to account for non reported
         self.recoveredAssumption = recoveredAssumption
-        self.nth = nth  # minimum number of cases to start modelling
+        self.R_0th = nth  # minimum number of cases to start modelling
         self.daysPredict = daysPredict
         self.quarantineDate = quarantineDate
         self.alpha = alpha
         self.betaBounds = betaBounds
         self.gammaBounds = gammaBounds
-        self.S0bounds = S0bounds
+        self.S0pbounds = S0pbounds
         self.hospRate = hospRate
         self.daysToHosp = daysToHosp
         self.hospitalDuration = daysToLeave
@@ -85,7 +85,7 @@ class SIR(object):
         self.recovered = self.recovered * self.infectedAssumption * self.recoveredAssumption
 
         # find date in which nth case is reached
-        nth_index = self.confirmed[self.confirmed >= self.nth].index[0]
+        nth_index = self.confirmed[self.confirmed >= self.R_0th].index[0]
 
         if not self.quarantineDate:
             self.quarantineDate = self.confirmed.index[-1]
@@ -112,22 +112,21 @@ class SIR(object):
     def initialize_parameters(self):
         self.R_0 = self.recovered[0] + self.fatal[0]
         self.I_0 = (self.confirmed.iloc[0] - self.R_0)
-        self.S_0 = self.N - self.R_0 - self.I_0
 
     def extend_index(self, index, new_size):
 
-        new_values = pd.date_range(start=index[-1], periods=150)
+        new_values = pd.date_range(start=index[-1], periods=new_size)
         new_index = index.join(new_values, how='outer')
 
         return new_index
 
-    def estimate(self, verbose=True):
+    def estimate(self, verbose=True, options=None):
 
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
 
         betaBounds = self.betaBounds
         gammaBounds = self.gammaBounds
-        S0bounds = self.S0bounds
+        S0pbounds = self.S0pbounds
 
         constraints = [
             {'type': 'ineq', 'fun': self.const_lowerBoundR0},
@@ -135,19 +134,22 @@ class SIR(object):
         ]
 
 
-
         optimal = minimize(
             self.loss,
-            [0.2, 0.07, 1e5],
+            # [0.2, 0.07, 1e5],
+            [0.2, 0.07, 0.01],
             args=(),
             method='SLSQP',
             # options={'maxiter' : 5},
             # method='TNC',
-            bounds=[betaBounds, gammaBounds, S0bounds],
-            constraints=constraints
+            bounds=[betaBounds, gammaBounds, S0pbounds],
+            constraints=constraints,
+            options=options,
         )
         self.optimizer = optimal
-        beta, gamma, S_0 = optimal.x
+        beta, gamma, S_0p = optimal.x
+        S_0 = S_0p * self.N
+
         if verbose:
             print("Beta:{beta} Gamma:{gamma} S_0:{S_0}".format(beta=beta, gamma=gamma, S_0=S_0))
         self.beta = beta
@@ -163,8 +165,9 @@ class SIR(object):
         I = y[1]
         R = y[2]
 
-        ret = [-self.beta_model * S * I / self.N, self.beta_model * S * I / self.N - self.gamma_model * I,
-               self.gamma_model * I]
+        ret = [-self.beta_model * S * I / self.S_0_model,   # S
+               self.beta_model * S * I / self.S_0_model - self.gamma_model * I,  # I
+               self.gamma_model * I]  # R
         return ret
 
     def loss(self, point):
@@ -172,13 +175,14 @@ class SIR(object):
         RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
         """
         size = self.I_actual.shape[0]
-        beta, gamma, S_0 = point
+        beta, gamma, S_0p = point
 
         self.beta_model = beta
         self.gamma_model = gamma
+        self.S_0_model = self.N * S_0p
 
         # solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
-        solution = solve_ivp(self.model, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
+        solution = solve_ivp(self.model, [0, size], [self.S_0_model, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
 
         # Put more emphasis on recovered people
         alpha = self.alpha
@@ -204,6 +208,7 @@ class SIR(object):
 
         self.beta_model = self.beta
         self.gamma_model = self.gamma
+        self.S_0_model = self.S_0
 
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
 
@@ -221,12 +226,12 @@ class SIR(object):
         self.df = df
         self.calculateNB()
 
-    def train(self,):
+    def train(self, options=None):
         """
         Run the optimization to estimate the beta and gamma fitting the given confirmed cases.
         """
 
-        self.estimate()
+        self.estimate(options=options)
 
         self.predict()
 
@@ -355,17 +360,17 @@ class SIHRF(SIR):
         H = y[2]
         R = y[3]
         F = y[4]
-
+        I_tot = I + H
         ret = [
-            # S
-            -self.beta_model * S * I / self.N,
+            # S - Susceptible
+            -self.beta_model * S * I_tot / self.S_0_model,
 
             # I
-            (1 - self.rho) * self.beta_model * S * I / self.N  # (1-rho) BIS/N
+            (1 - self.rho) * self.beta_model * S * I_tot / self.S_0_model  # (1-rho) BIS/N
             - self.gamma_I_model * I,  # Gamma_I x I
 
             # H
-            self.rho * self.beta_model * S * I / self.N  # rho BIS/N
+            self.rho * self.beta_model * S * I_tot / self.S_0_model  # rho BIS/N
             - (1 - self.delta_model) * self.gamma_H_model * H  # - (1-delta) gamma_H H
             - self.delta_model * self.omega_model * H,  # - delta omega H,
 
@@ -390,7 +395,7 @@ class SIHRF(SIR):
         self.F_actual = self.fatal
         self.I_actual = self.confirmed - self.R_actual - self.F_actual  # obs this is total I
 
-    def estimate(self, verbose=True):
+    def estimate(self, verbose=True, options=None):
         """
         List of parameters to estimate:
         * beta
@@ -405,11 +410,10 @@ class SIHRF(SIR):
         """
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
         betaBounds = self.betaBounds
-        S0bounds = self.S0bounds
+        S0pbounds = self.S0pbounds
         gamma_i_bounds = self.gamma_i_bounds
         gamma_h_bounds = self.gamma_h_bounds
         omega_bounds = self.omega_bounds
-        genericGammaBounds = (0.001, 0.2)
         deltaBounds = self.delta_bounds
 
         constraints = [
@@ -427,7 +431,7 @@ class SIHRF(SIR):
                 .07,  # gamma I
                 0.07,  # gamma H
                 0.07,  # omega
-                1e6,  # S0
+                .01,  # S0p
                 0.05,  # delta
             ]),
             args=(),
@@ -440,15 +444,20 @@ class SIHRF(SIR):
                 gamma_i_bounds,
                 gamma_h_bounds,
                 omega_bounds,
-                S0bounds,
+                S0pbounds,
                 deltaBounds,
 
             ],
             constraints=constraints,
+            options=options,
         )
         self.optimizer = optimal
-        beta, gamma_I, gamma_H, omega, S_0, delta = optimal.x
-        gamma = gamma_I + (1 - delta) * gamma_H + delta * omega
+        beta, gamma_I, gamma_H, omega, S_0p, delta = optimal.x
+
+        # NOTE this gamma formula only works because beta_IN = beta_H
+        gamma = (1-self.rho) * gamma_I + self.rho * ((1 - delta) * gamma_H + delta * omega)
+
+        S_0 = self.N * S_0p
 
         if verbose:
             print("Beta:{beta} Gamma:{gamma} S_0:{S_0}".format(beta=beta, gamma=gamma, S_0=S_0))
@@ -476,7 +485,7 @@ class SIHRF(SIR):
         self.R_0 = self.recovered[0]
         self.F_0 = self.fatal[0]
         self.I_0 = self.confirmed.iloc[0] - self.R_0 - self.F_0
-        # self.S_0 = self.N - self.R_0 - self.I_0 - self.F_0
+        # self.S_0 = self.R_0 - self.R_0 - self.I_0 - self.F_0
         self.H_0 = self.I_0 * self.rho
         self.I_0 = self.I_0 * (1 - self.rho)
 
@@ -485,19 +494,21 @@ class SIHRF(SIR):
         RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
         """
         size = self.I_actual.shape[0]
-        beta, gamma_I, gamma_H, omega, S_0, delta = point
+        beta, gamma_I, gamma_H, omega, S_0p, delta = point
 
-        gamma = gamma_I + (1 - delta) * gamma_H + delta * omega
+        gamma = (1-self.rho) * gamma_I + self.rho * ((1 - delta) * gamma_H + delta * omega)
 
         self.gamma_model = gamma
+
         self.beta_model = beta
         self.gamma_I_model = gamma_I
         self.gamma_H_model = gamma_H
         self.omega_model = omega
         self.delta_model = delta
+        self.S_0_model = self.N * S_0p
 
         # solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
-        solution = solve_ivp(self.model, [0, size], [S_0, self.I_0, self.H_0, self.R_0, self.F_0],
+        solution = solve_ivp(self.model, [0, size], [self.S_0_model, self.I_0, self.H_0, self.R_0, self.F_0],
                              t_eval=np.arange(0, size, 1), vectorized=True)
 
         # Put more emphasis on recovered people
@@ -687,18 +698,18 @@ class SIR_sigmoid(SIR):
 
         self.beta_model = self.sigmoid(t)
 
-        ret = [-self.beta_model * S * I / self.N, self.beta_model * S * I / self.N - self.gamma_model * I,
+        ret = [-self.beta_model * S * I / self.S_0_model, self.beta_model * S * I / self.S_0_model - self.gamma_model * I,
                self.gamma_model * I]
         return ret
 
-    def estimate(self, verbose=True):
+    def estimate(self, verbose=True, options=None):
 
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
         self.sig_normal_t = self.quarantine_loc + 7
 
         betaBounds = self.betaBounds
         gammaBounds = self.gammaBounds
-        S0bounds = self.S0bounds
+        S0pbounds = self.S0pbounds
         lambdaBounds = self.lambda_bounds
 
 
@@ -710,16 +721,17 @@ class SIR_sigmoid(SIR):
 
         optimal = minimize(
             self.loss,
-            [0.2, 0.2, 1, 0.07, 1e5],
+            [0.2, 0.2, 1, 0.07, 0.01],
             args=(),
             method='SLSQP',
             # options={'maxiter' : 5},
             # method='TNC',
-            bounds=[betaBounds, betaBounds, lambdaBounds, gammaBounds, S0bounds],
+            bounds=[betaBounds, betaBounds, lambdaBounds, gammaBounds, S0pbounds],
             constraints=constraints
         )
         self.optimizer = optimal
-        beta1, beta2, lamb, gamma, S_0 = optimal.x
+        beta1, beta2, lamb, gamma, S_0p = optimal.x
+        S_0 = self.N * S_0p
         if verbose:
             print("Beta1:{beta1} Beta2:{beta2} Lambda:{lamb} Gamma:{gamma} S_0:{S_0}".format(beta1=beta1, beta2=beta2,
                                                                                              lamb=lamb, gamma=gamma, S_0=S_0))
@@ -740,15 +752,16 @@ class SIR_sigmoid(SIR):
         RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
         """
         size = self.I_actual.shape[0]
-        beta1, beta2, lamb, gamma, S_0 = point
+        beta1, beta2, lamb, gamma, S_0p = point
 
         self.beta1_model = beta1
         self.beta2_model = beta2
         self.lambda_model = lamb
         self.gamma_model = gamma
+        self.S_0_model = self.N * S_0p
 
         # solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
-        solution = solve_ivp(self.model, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
+        solution = solve_ivp(self.model, [0, size], [self.S_0_model, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
 
         # Put more emphasis on recovered people
         alpha = self.alpha
@@ -837,7 +850,6 @@ class SEIR(SIR):
             self.E_0 = self.forceE0
         self.R_0 = self.recovered[0] + self.fatal[0]
         self.I_0 = (self.confirmed.iloc[0] - self.R_0)
-        self.S_0 = self.N - self.R_0 - self.I_0
 
     def loss(self, point):
         """
@@ -858,9 +870,9 @@ class SEIR(SIR):
             R = y[3]
 
             if t < self.quarantine_loc:
-                ret = [-beta * S * I / self.N, beta * S * I / self.N - sigma * E, sigma * E - gamma * I, gamma * I]
+                ret = [-beta * S * I / self.S_0, beta * S * I / self.S_0 - sigma * E, sigma * E - gamma * I, gamma * I]
             else:
-                ret = [-beta2 * S * I / self.N, beta2 * S * I / self.N - sigma * E, sigma * E - gamma * I, gamma * I]
+                ret = [-beta2 * S * I / self.S_0, beta2 * S * I / self.S_0 - sigma * E, sigma * E - gamma * I, gamma * I]
             return ret
 
         solution = solve_ivp(SIR, [0, size], [self.S_0, self.E_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
@@ -914,9 +926,9 @@ class SEIR(SIR):
             R = y[3]
 
             if t < self.quarantine_loc:
-                ret = [-beta * S * I / self.N, beta * S * I / self.N - sigma * E, sigma * E - gamma * I, gamma * I]
+                ret = [-beta * S * I / self.S_0, beta * S * I / self.S_0 - sigma * E, sigma * E - gamma * I, gamma * I]
             else:
-                ret = [-beta2 * S * I / self.N, beta2 * S * I / self.N - sigma * E, sigma * E - gamma * I, gamma * I]
+                ret = [-beta2 * S * I / self.S_0, beta2 * S * I / self.S_0 - sigma * E, sigma * E - gamma * I, gamma * I]
             return ret
 
         # print(self.backDate)
@@ -962,10 +974,10 @@ class LearnerSEIR(object):
                  ):
 
         self.country = country
-        self.N = N
+        self.R_0 = N
         self.infectedAssumption = infectedAssumption  # Multiplier to account for non reported
         self.recoveredAssumption = recoveredAssumption
-        self.nth = nth  # minimum number of cases to start modelling
+        self.R_0th = nth  # minimum number of cases to start modelling
         self.daysPredict = daysPredict
         self.quarantineDate = quarantineDate
         self.backDate = backDate
@@ -1009,7 +1021,7 @@ class LearnerSEIR(object):
         self.recovered = self.recovered * self.infectedAssumption * self.recoveredAssumption
 
         # find date in which nth case is reached
-        nth_index = self.confirmed[self.confirmed >= self.nth].index[0]
+        nth_index = self.confirmed[self.confirmed >= self.R_0th].index[0]
 
         if not self.quarantineDate:
             self.quarantineDate=self.confirmed.index[-1]
@@ -1025,7 +1037,7 @@ class LearnerSEIR(object):
         self.E_0 = self.confirmed.iloc[self.elag]
         self.R_0 = self.recovered[0] + self.fatal[0]
         self.I_0 = (self.confirmed.iloc[0] - self.R_0)
-        self.S_0 = self.N - self.R_0 - self.I_0
+        self.S_0 = self.R_0 - self.R_0 - self.I_0
 
         #True data series
         self.R_actual = self.fatal + self.recovered
@@ -1110,9 +1122,9 @@ class LearnerSEIR(object):
             R = y[3]
 
             if t < self.quarantine_loc:
-                ret = [-beta * S * I / self.N, beta * S * I / self.N - sigma * E, sigma * E - gamma * I, gamma * I]
+                ret = [-beta * S * I / self.R_0, beta * S * I / self.R_0 - sigma * E, sigma * E - gamma * I, gamma * I]
             else:
-                ret = [-beta2 * S * I / self.N, beta2 * S * I / self.N - sigma * E, sigma * E - gamma * I, gamma * I]
+                ret = [-beta2 * S * I / self.R_0, beta2 * S * I / self.R_0 - sigma * E, sigma * E - gamma * I, gamma * I]
             return ret
 
         solution = solve_ivp(SIR, [0, size], [self.S_0, self.E_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
@@ -1166,9 +1178,9 @@ class LearnerSEIR(object):
             R = y[3]
 
             if t < self.quarantine_loc:
-                ret = [-beta * S * I / self.N, beta * S * I / self.N - sigma * E, sigma * E - gamma * I, gamma * I]
+                ret = [-beta * S * I / self.R_0, beta * S * I / self.R_0 - sigma * E, sigma * E - gamma * I, gamma * I]
             else:
-                ret = [-beta2 * S * I / self.N, beta2 * S * I / self.N - sigma * E, sigma * E - gamma * I, gamma * I]
+                ret = [-beta2 * S * I / self.R_0, beta2 * S * I / self.R_0 - sigma * E, sigma * E - gamma * I, gamma * I]
             return ret
 
         # print(self.backDate)
@@ -1229,11 +1241,11 @@ class LearnerSEIR(object):
             R = y[2]
 
             if t < self.quarantine_loc:
-                ret = [(-beta * S * I / self.N) + S, (beta * S * I / self.N - gamma * I) + I, (gamma * I) + R]
+                ret = [(-beta * S * I / self.R_0) + S, (beta * S * I / self.R_0 - gamma * I) + I, (gamma * I) + R]
             elif t < self.back_loc:
-                ret = [(-beta3 * S * I / self.N) + S, (beta3 * S * I / self.N - gamma * I) + I, (gamma * I) + R]
+                ret = [(-beta3 * S * I / self.R_0) + S, (beta3 * S * I / self.R_0 - gamma * I) + I, (gamma * I) + R]
             else:
-                ret = [(-beta2 * S * I / self.N) + S, (beta2 * S * I / self.N - gamma * I) + I, (gamma * I) + R]
+                ret = [(-beta2 * S * I / self.R_0) + S, (beta2 * S * I / self.R_0 - gamma * I) + I, (gamma * I) + R]
             return ret
 
         # print(self.backDate)
@@ -1288,43 +1300,54 @@ class LearnerSEIR(object):
 
 
 if __name__ == '__main__':
-    # jap = SIR('Brazil',
-    #               N=200e6,
-    #               alpha=0.7,
-    #               betaBounds=(0.1, 0.3),
-    #               gammaBounds=(0.05, 0.1),
-    #               )
-    # jap.train()
+    # Stressing the model with fixed params
 
-    # jap = SEIR(country='Brazil',
-    #           N=200e6,
-    #           alpha=0.7,
-    #           betaBounds=(0.1, 0.3),
-    #           gammaBounds=(0.05, 0.1),
-    #           )
-    # jap.train()
+    hospRate = 0.05
+    # deltaUpperBound = 0.035 / hospRate
+    deltaUpperBound = 79 / 165
+    # deltaUpperBound = 1
+    gi = 0.1
+    gh = 0.07
+    omega = 0.07
 
-    S0 = 5e6
-    t1 = SIR_sigmoid(country='Brazil',
-                     N=1e6,
-                     # N=1e6,
-                     alpha=0.5,
-                     betaBounds=(0.1, 1.5),
-                     gammaBounds=(0.05, 2.0),
-                     lambda_bounds=(1, 1),
-                     # S0bounds = (2.0e6, 200e6 * .12),
-                     S0bounds=(S0, S0),
-                     nth=100,
-                     hospRate=0.10,
-                     daysToHosp=4,  # big for detction
-                     daysToLeave=12,
-                     infectedAssumption=1,
-                     # forcedBeta = 3,
-                     quarantineDate=dt.datetime(2020, 3, 24),  # italy lockdown was on the 9th, brazil 24-march
-                     # opt='SLSQP',
-                     R0bounds=(2.0, 3.0),
-                     adjust_recovered=True,
+    # Mudar omega bouds /
 
-                     )
+    t1 = SIHRF(country='Brazil',
+               N=200e6,
+               # N=1e6,
+               alpha=.7,
+               S0pbounds=(16e6 / 200e6, 16e6 / 200e6),
+               nth=100,
+               daysToHosp=4,  # big for detction
+               daysToLeave=12,
+               daysPredict=2000,
+               infectedAssumption=1,
+               # forcedBeta = 3,
+               quarantineDate=dt.datetime(2020, 3, 24),  # italy lockdown was on the 9th
+               # estimateBeta2 = True
+               # opt='SLSQP',
+               R0bounds=(0, 20),
+               hospRate=hospRate,
+
+               # Usual restrictions
+               # delta_bounds=(0, deltaUpperBound),
+               # betaBounds=(0.1, 1.5),
+               # gammaBounds=(0.01, .2),
+               # gamma_i_bounds=(1/(5*7), 1/(1*7)),
+               # gamma_h_bounds=(1/(8*7), 1/(1*7)),
+               # omega_bounds=(1/(8*7), 1/(1*7)),
+
+               # restricted
+               delta_bounds=(0, deltaUpperBound),
+               betaBounds=(0.2, 0.2),
+               gammaBounds=(0, 1),
+               gamma_i_bounds=(gi, gi),
+               gamma_h_bounds=(gh, gh),
+               omega_bounds=(omega, omega),
+
+               # omega_bounds=(1/12, 1/12),
+               # alphas=(0,0,1),
+               adjust_recovered=True,
+               )
 
     t1.train()
