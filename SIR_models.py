@@ -356,30 +356,36 @@ class SIHRF(SIR):
 
     def model(self, t, y):
         S = y[0]
-        I = y[1]
-        H = y[2]
-        R = y[3]
-        F = y[4]
-        I_tot = I + H
+        I_n = y[1]
+        H_r = y[2]
+        H_f = y[3]
+        R = y[4]
+        F = y[5]
+
+        I = I_n + H_r + H_f
+
         ret = [
             # S - Susceptible
-            -self.beta_model * S * I_tot / self.S_0_model,
+            -self.beta_model * I * S / self.S_0_model,
 
-            # I
-            (1 - self.rho) * self.beta_model * S * I_tot / self.S_0_model  # (1-rho) BIS/N
-            - self.gamma_I_model * I,  # Gamma_I x I
+            # I_n
+            (1 - self.rho) * self.beta_model * I * S / self.S_0_model  # (1-rho) BIS/N
+            - self.gamma_I_model * I_n,  # Gamma_I x I_n
 
-            # H
-            self.rho * self.beta_model * S * I_tot / self.S_0_model  # rho BIS/N
-            - (1 - self.delta_model) * self.gamma_H_model * H  # - (1-delta) gamma_H H
-            - self.delta_model * self.omega_model * H,  # - delta omega H,
+            # H_r
+            self.rho * (1 - self.delta_model) * self.beta_model * I * S / self.S_0_model  # rho * (1-delta) BIS/N
+            - self.gamma_H_model * H_r,
+
+            # H_f
+            self.rho * self.delta_model * self.beta_model * I * S / self.S_0_model  # rho * (delta) BIS/N
+            - self.omega_model * H_f,
 
             # R
-            self.gamma_I_model * I  # gamma_I * I
-            + (1 - self.delta_model) * self.gamma_H_model * H,  # (1-delta) gamma_H * H
+            self.gamma_I_model * I_n  # gamma_I * In
+            + self.gamma_H_model * H_r,  # gamma_H * Hr
 
             # F
-            self.delta_model * self.omega_model * H,
+            self.omega_model * H_f,
         ]
 
         return ret
@@ -431,7 +437,7 @@ class SIHRF(SIR):
                 .07,  # gamma I
                 0.07,  # gamma H
                 0.07,  # omega
-                .01,  # S0p
+                .2,  # S0p
                 0.05,  # delta
             ]),
             args=(),
@@ -457,7 +463,7 @@ class SIHRF(SIR):
         # NOTE this gamma formula only works because beta_IN = beta_H
         gamma = (1-self.rho) * gamma_I + self.rho * ((1 - delta) * gamma_H + delta * omega)
 
-        S_0 = self.N * S_0p
+        S_0 = self.N * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
 
         if verbose:
             print("Beta:{beta} Gamma:{gamma} S_0:{S_0}".format(beta=beta, gamma=gamma, S_0=S_0))
@@ -485,9 +491,10 @@ class SIHRF(SIR):
         self.R_0 = self.recovered[0]
         self.F_0 = self.fatal[0]
         self.I_0 = self.confirmed.iloc[0] - self.R_0 - self.F_0
-        # self.S_0 = self.R_0 - self.R_0 - self.I_0 - self.F_0
-        self.H_0 = self.I_0 * self.rho
-        self.I_0 = self.I_0 * (1 - self.rho)
+        self.I_n_0 = self.I_0 * (1 - self.rho)
+        self.H_r_0 = self.rho * (1 - 79/165) * self.I_0 #TODO Might be a strong assumption, check sensitivity
+        self.H_f_0 = self.rho * (79/165) * self.I_0
+        self.H_0 = self.H_r_0 + self.H_f_0
 
     def loss(self, point):
         """
@@ -496,7 +503,7 @@ class SIHRF(SIR):
         size = self.I_actual.shape[0]
         beta, gamma_I, gamma_H, omega, S_0p, delta = point
 
-        gamma = (1-self.rho) * gamma_I + self.rho * ((1 - delta) * gamma_H + delta * omega)
+        gamma = (1-self.rho) * gamma_I + self.rho * ((1 - delta) * gamma_H + delta * omega) #TODO check gamma calc
 
         self.gamma_model = gamma
 
@@ -505,20 +512,36 @@ class SIHRF(SIR):
         self.gamma_H_model = gamma_H
         self.omega_model = omega
         self.delta_model = delta
-        self.S_0_model = self.N * S_0p
+        self.S_0_model = self.N * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
+
+
 
         # solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
-        solution = solve_ivp(self.model, [0, size], [self.S_0_model, self.I_0, self.H_0, self.R_0, self.F_0],
+        solution = solve_ivp(self.model, [0, size], [self.S_0_model, self.I_n_0, self.H_r_0, self.H_f_0, self.R_0, self.F_0],
                              t_eval=np.arange(0, size, 1), vectorized=True)
+
+        y = solution.y
+        S = y[0]
+        I_n = y[1]
+        H_r = y[2]
+        H_f = y[3]
+        R = y[4]
+        F = y[5]
+
+        I = I_n + H_r + H_f
 
         # Put more emphasis on recovered people
         alphas = self.alphas
 
-        l1 = np.sqrt(np.mean(((solution.y[1] + solution.y[2]) - self.I_actual) ** 2))  # note that I_actual is I + H
-        l2 = np.sqrt(np.mean((solution.y[3] - self.R_actual) ** 2))
-        l3 = np.sqrt(np.mean((solution.y[4] - self.F_actual) ** 2))
+        l1 = np.sqrt(np.mean(((I) - self.I_actual) ** 2))
+        l2 = np.sqrt(np.mean((R - self.R_actual) ** 2))
+        l3 = np.sqrt(np.mean((F - self.F_actual) ** 2))
 
-        return alphas[0] * l1 + alphas[1] * l2 + alphas[2] * l3
+        loss = alphas[0] * l1 + alphas[1] * l2 + alphas[2] * l3
+
+        #print(S_0p, loss)
+
+        return loss
 
     def predict(self,):
         """
@@ -535,19 +558,31 @@ class SIHRF(SIR):
 
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
 
-        prediction = solve_ivp(self.model, [0, size], [self.S_0, self.I_0, self.H_0, self.R_0, self.F_0],
+        prediction = solve_ivp(self.model, [0, size], [self.S_0_model, self.I_n_0, self.H_r_0, self.H_f_0, self.R_0, self.F_0],
                              t_eval=np.arange(0, size, 1), vectorized=True)
+
+        y = prediction.y
+        S = y[0]
+        I_n = y[1]
+        H_r = y[2]
+        H_f = y[3]
+        R = y[4]
+        F = y[5]
+        H = H_r + H_f
+        I = I_n + H
 
         df = pd.DataFrame({
             'I_Actual': self.I_actual.reindex(new_index),
             'R_Actual': self.R_actual.reindex(new_index),
             'F_Actual': self.F_actual.reindex(new_index),
-            'S': prediction.y[0],
-            'IN': prediction.y[1],
-            'H': prediction.y[2],
-            'R': prediction.y[3],
-            'F': prediction.y[4],
-            'I': prediction.y[1] + prediction.y[2]
+            'S': S,
+            'I': I,
+            'I_n': I_n,
+            'H_r': H_r,
+            'H_f': H_f,
+            'H': H,
+            'R': R,
+            'F': F,
         }, index=new_index)
 
         self.df = df
@@ -561,9 +596,10 @@ class SIHRF(SIR):
         F_actual = self.R_actual.copy()
 
         for date in self.confirmed.index:
-            self.I_actual = I_actual.loc[:date]
-            self.R_actual = R_actual.loc[:date]
-            self.F_actual = F_actual.loc[:date]
+            date1 = date + dt.timedelta(days=1)
+            self.I_actual = I_actual.loc[:date1]
+            self.R_actual = R_actual.loc[:date1]
+            self.F_actual = F_actual.loc[:date1]
             self.estimate(verbose=False)
             self.predict()  #TODO CHECK IF THIS IS OK AND NO INDENXING IS NECESSARY
             hospList.append(self.df['H'].max())
@@ -596,7 +632,7 @@ class SIHRF(SIR):
             'F_Actual': '--',
         }
 
-        self.df[['I_Actual', 'I', 'IN', 'H']].loc[:self.end_data].plot(style=line_styles)
+        self.df[['I_Actual', 'I', 'I_n', 'H']].loc[:self.end_data].plot(style=line_styles)
 
     def H_F_plot(self):
         line_styles = {
@@ -1300,27 +1336,22 @@ class LearnerSEIR(object):
 
 
 if __name__ == '__main__':
-    # Stressing the model with fixed params
-
     hospRate = 0.05
     # deltaUpperBound = 0.035 / hospRate
     deltaUpperBound = 79 / 165
-    # deltaUpperBound = 1
-    gi = 0.1
-    gh = 0.07
-    omega = 0.07
 
     # Mudar omega bouds /
+    NB = 16e6
 
     t1 = SIHRF(country='Brazil',
                N=200e6,
                # N=1e6,
                alpha=.7,
-               S0pbounds=(16e6 / 200e6, 16e6 / 200e6),
-               nth=100,
+               S0pbounds=(NB * .25 / 200e6, NB / 200e6),
+               nth=20,
                daysToHosp=4,  # big for detction
                daysToLeave=12,
-               daysPredict=2000,
+               daysPredict=300,
                infectedAssumption=1,
                # forcedBeta = 3,
                quarantineDate=dt.datetime(2020, 3, 24),  # italy lockdown was on the 9th
@@ -1335,19 +1366,22 @@ if __name__ == '__main__':
                # gammaBounds=(0.01, .2),
                # gamma_i_bounds=(1/(5*7), 1/(1*7)),
                # gamma_h_bounds=(1/(8*7), 1/(1*7)),
-               # omega_bounds=(1/(8*7), 1/(1*7)),
+               # omega_bounds=(1/(6*7), 1/(3*7)),
 
-               # restricted
+               # Unrestricted
                delta_bounds=(0, deltaUpperBound),
-               betaBounds=(0.2, 0.2),
-               gammaBounds=(0, 1),
-               gamma_i_bounds=(gi, gi),
-               gamma_h_bounds=(gh, gh),
-               omega_bounds=(omega, omega),
+               betaBounds=(0.01, 0.5),
+               gammaBounds=(0.01, 1.0),
+               gamma_i_bounds=(0.01, .5),
+               gamma_h_bounds=(0.01, .5),
+               # omega_bounds=(0.01, .5),
 
                # omega_bounds=(1/12, 1/12),
-               # alphas=(0,0,1),
+               alphas=(.1, 0, .9),
                adjust_recovered=True,
                )
 
+    t1.train(options={'eps': 1e-2})
+
     t1.train()
+    t1.rollingHosp()
