@@ -539,9 +539,9 @@ class SIHRF(SIR):
         # Put more emphasis on recovered people
         alphas = self.alphas
 
-        l1 = np.sqrt(np.mean(((I) - self.I_actual) ** 2))
-        l2 = np.sqrt(np.mean((R - self.R_actual) ** 2))
-        l3 = np.sqrt(np.mean((F - self.F_actual) ** 2))
+        l1 = np.sqrt(np.mean(((I - self.I_actual) / self.I_actual) ** 2))
+        l2 = np.sqrt(np.mean(((R - self.R_actual) / self.R_actual) ** 2))
+        l3 = np.sqrt(np.mean(((F - self.F_actual) / self.F_actual) ** 2))
 
         loss = alphas[0] * l1 + alphas[1] * l2 + alphas[2] * l3
 
@@ -918,9 +918,17 @@ class SIHRF_Sigmoid(SIHRF):
         # Put more emphasis on recovered people
         alphas = self.alphas
 
-        l1 = np.sqrt(np.mean((I - self.I_actual) ** 2))
-        l2 = np.sqrt(np.mean((R - self.R_actual) ** 2))
-        l3 = np.sqrt(np.mean((F - self.F_actual) ** 2))
+        l1 = ((I - self.I_actual) / self.I_actual) ** 2
+        l1.replace([np.inf, -np.inf, np.nan], 0, inplace=True)
+        l1 = np.sqrt(np.mean(l1))
+
+        l2 = ((R - self.R_actual) / self.R_actual) ** 2
+        l2.replace([np.inf, -np.inf, np.nan], 0, inplace=True)
+        l2 = np.sqrt(np.mean(l2))
+
+        l3 = ((F - self.F_actual) / self.F_actual) ** 2
+        l3.replace([np.inf, -np.inf, np.nan], 0, inplace=True)
+        l3 = np.sqrt(np.mean(l3))
 
         loss = alphas[0] * l1 + alphas[1] * l2 + alphas[2] * l3
 
@@ -1138,10 +1146,6 @@ class SIR_sigmoid(SIR):
         # self.const_upperBoundR0_S0opt.__code__.co_varnames
         beta1, beta2, lamb, gamma, S_0 = point
         return beta1 - beta2
-
-
-
-
 
 class SEIR(SIR):
     def __init__(self,
@@ -1609,9 +1613,8 @@ class LearnerSEIR(object):
         ax.set_title(self.country)
         self.df.plot(ax=ax)
 
-
-
 if __name__ == '__main__':
+    # Versão mais parecida com a utilizada no PPT
     hospRate = 0.05
     # deltaUpperBound = 0.035 / hospRate
     deltaUpperBound = 79 / 165
@@ -1620,70 +1623,64 @@ if __name__ == '__main__':
     omega = 0.07
 
     # Mudar omega bouds /
-    NB = 16e6
+    N = 200e6
 
-    t1 = SIHRF(country='Brazil',
-               N=200e6,
-               # N=1e6,
-               alpha=.7,
-               nth=100,
-               daysToHosp=4,  # big for detction
-               daysToLeave=12,
-               daysPredict=150,
-               infectedAssumption=1,
-               # forcedBeta = 3,
-               quarantineDate=dt.datetime(2020, 3, 24),  # italy lockdown was on the 9th
-               # estimateBeta2 = True
-               # opt='SLSQP',
-               R0bounds=(0, 20),
-               hospRate=hospRate,
+    t1 = SIHRF_Sigmoid(country='Brazil',
+                       N=N,
+                       # N=1e6,
+                       alpha=.7,
+                       nth=100,
+                       daysToHosp=4,  # big for detction
+                       daysToLeave=12,
+                       daysPredict=150,
+                       infectedAssumption=1,
+                       # forcedBeta = 3,
+                       quarantineDate=dt.datetime(2020, 3, 24),  # italy lockdown was on the 9th
+                       # estimateBeta2 = True
+                       # opt='SLSQP',
+                       R0bounds=(0, 20),
+                       hospRate=hospRate,
 
-               # Usual restrictions
-               S0pbounds=(15e6 / 200e6, 15e6 / 200e6),
-               delta_bounds=(0, deltaUpperBound),
-               betaBounds=(0.1, 1.5),
-               gammaBounds=(0.01, .2),
-               gamma_i_bounds=(1 / (5 * 7), 1 / (1 * 7)),
-               gamma_h_bounds=(1 / (8 * 7), 1 / (1 * 7)),
-               omega_bounds=(1 / (6 * 7), 1 / (3)),
+                       # Loose restrictions
+                       # S0pbounds=(10e6 / 200e6, 10e6 / 200e6),
+                       # delta_bounds=(0, deltaUpperBound),
+                       # betaBounds=(0.20, 1.5),
+                       # gammaBounds=(0.01, .2),
+                       # gamma_i_bounds=(1/(20), 1/(1)),
+                       # gamma_h_bounds=(1/(8*7), 1/(2*7)),
+                       # omega_bounds=(1/(4*7), 1/(3)),
 
-               # restricted
-               # S0pbounds=(.5e6 / 200e6, 50e6 / 200e6),
-               # delta_bounds=(deltaUpperBound, deltaUpperBound),
-               # betaBounds=(0.3, 0.3),
-               # gammaBounds=(0, 1),
-               # gamma_i_bounds=(gi, gi),
-               # gamma_h_bounds=(gh, gh),
-               # omega_bounds=(omega, omega),
+                       # Tight restrictions
+                       # S0pbounds=(10e6 / N, 10e6 / N),
+                       # S0pbounds=(.015, .015),
+                       # delta_bounds=(0, deltaUpperBound),
+                       # betaBounds=(0.20, 1.5),
+                       # gammaBounds=(0.05, .15),
+                       # gamma_i_bounds=(1 / (14), 1 / (5)),
+                       # gamma_h_bounds=(1 / (6 * 7), 1 / (3 * 7)),
+                       # omega_bounds=(1 / (12), 1 / (3)),
 
-               # omega_bounds=(1/12, 1/12),
-               alphas=(.015, .0, .985),
-               adjust_recovered=True,
-               )
+                       # restricted - EM Algo
+                       S0pbounds=(10e6 / 200e6, 10e6 / 200e6),
+                       delta_bounds=(deltaUpperBound, deltaUpperBound),
+                       betaBounds=(0.2, 0.38564),
+                       gammaBounds=(0, 1),
+                       gamma_i_bounds=(0.1008, 0.1008),
+                       gamma_h_bounds=(0.02380, 0.02380),
+                       omega_bounds=(0.0833, 0.0833),
+
+                       # restricted
+                       # S0pbounds=(.5e6 / 200e6, 50e6 / 200e6),
+                       # delta_bounds=(deltaUpperBound, deltaUpperBound),
+                       # betaBounds=(0.4, 0.2),
+                       # gammaBounds=(0, 1),
+                       # gamma_i_bounds=(gi, gi),
+                       # gamma_h_bounds=(gh, gh),
+                       # omega_bounds=(omega, omega),
+
+                       # omega_bounds=(1/12, 1/12),
+                       alphas=(.05, .05, .9),
+                       adjust_recovered=True,
+                       )
 
     t1.train()
-    # options={'eps': 5e-3, }
-    # options={'eps': 1e-3, 'ftol': 1e-7}
-
-    # t1.main_plot()
-
-    print(t1.gamma_i_bounds)
-    print(t1.gamma_h_bounds)
-    print(t1.omega_bounds)
-    print('\nI Max:')
-    print(t1.df.I.max())
-    print('Est:')
-    print(t1.df.I.max() * .15)
-    print('H Max:')
-    print(t1.df['H'].max())
-    print('R Max:')
-    print(t1.df['R'].max())
-    print('F Max:')
-    print(t1.df['F'].max())
-    print('F+R Max:')
-    print(t1.df['F'].max() + t1.df['R'].max())
-    # (t1.df.S + t1.df.I + t1.df.R + t1.df.F)
-
-    # t1.optimizer
-    t1.rollingBetas()
-    # t1.rollingHospPlot()
