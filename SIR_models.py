@@ -250,9 +250,11 @@ class SIR(object):
         gammasList = []
         I_actual = self.I_actual.copy()
         R_actual = self.R_actual.copy()
+        F_actual = self.F_actual.copy()
         for date in self.confirmed.index:
             self.I_actual = I_actual.loc[:date]
             self.R_actual = R_actual.loc[:date]
+            self.F_actual = F_actual.loc[:date]
             self.estimate(verbose=False)
             betasList.append(self.beta)
             gammasList.append(self.gamma)
@@ -314,11 +316,15 @@ class SIR(object):
 
         self.df.plot(ax=ax, style=line_styles, )
 
-    def rollingPlot(self):
+    def rollingPlot(self, export=False):
         axes = self.rollingList.plot()
         fig = axes.get_figure()
 
         axes.axvline(x=self.quarantineDate, color='red', linestyle='--', label='Quarentine')
+
+        if export:
+            self.rollingList.to_excel('export_RollingBetas.xlsx')
+
 
 class SIHRF(SIR):
     """
@@ -469,9 +475,9 @@ class SIHRF(SIR):
             print("Beta:{beta} Gamma:{gamma} S_0:{S_0}".format(beta=beta, gamma=gamma, S_0=S_0))
             print("Beta:{value} ".format(value=beta,))
             print("Gamma:{value} ".format(value=gamma, ))
-            print("Gamma I:{value} ".format(value=gamma_I, ))
-            print("Gamma H:{value} ".format(value=gamma_H, ))
-            print("Omega:{value} ".format(value=omega, ))
+            print("Gamma I:{value} | {values2} days".format(value=gamma_I, values2=1 / gamma_I, ))
+            print("Gamma H:{value} | {values2} days".format(value=gamma_H, values2=1 / gamma_H))
+            print("Omega:{value} | {values2} days".format(value=omega, values2=1 / omega))
             print("S0:{value} ".format(value=S_0, ))
             print("Delta:{value} ".format(value=delta, ))
 
@@ -593,7 +599,7 @@ class SIHRF(SIR):
         gammasList = []
         I_actual = self.I_actual.copy()
         R_actual = self.R_actual.copy()
-        F_actual = self.R_actual.copy()
+        F_actual = self.F_actual.copy()
 
         for date in self.confirmed.index:
             date1 = date + dt.timedelta(days=1)
@@ -661,10 +667,11 @@ class SIHRF(SIR):
 
         self.df[['I_Actual', 'R_Actual', 'F_Actual']].loc[:self.end_data].plot(style=line_styles)
 
-    def rollingHospPlot(self):
+    def rollingHospPlot(self, export=False):
         axes = self.rollingHospList.plot()
         fig = axes.get_figure()
-
+        if export:
+            self.rollingHospList.to_excel('export_HospPlot.xlsx')
         axes.axvline(x=self.quarantineDate, color='red', linestyle='--', label='Quarentine')
         axes.axhline(y=50000, color='black', linestyle='--', label='Hospital Capacity')
 
@@ -712,6 +719,271 @@ class SIHRF(SIR):
         R0 = beta / gamma
         return upperBound - R0
 
+class SIHRF_Sigmoid(SIHRF):
+    """
+    This SIR extension split the infected compartiment into non-hospital and hospital cases and the recovered group
+    into recovered and fatal
+
+    $$\frac{dS}{dt} = - \frac{\beta IS}{N}$$
+
+    $$\frac{dIN}{dt} = (1 - \rho) \times \frac{\beta IS}{N} - \gamma_{IN} IN$$
+
+    $$\frac{dIH}{dt} = \rho \times \frac{\beta IS}{N} - (1-\delta) \times \gamma_{IH} IH - \delta \times \omega_{IH} IH$$
+
+
+    $$\frac{dR}{dt} = \gamma_{IN} IN + (1-\delta) \times \gamma_{IH} IH $$
+
+    $$\frac{dF}{dt} = \delta \times \omega_{IH} IH$$
+    """
+    def __init__(self,
+                 lambda_bounds=(0.25, 4),
+                 **kwargs):
+        self.lambda_bounds = lambda_bounds
+        super().__init__(**kwargs)
+
+    def sigmoid(self, t):
+        # Normalize t
+        t = t - self.sig_normal_t
+        return (self.beta1_model - self.beta2_model) / (1 + np.exp(t / self.lambda_model)) + self.beta2_model
+
+    def model(self, t, y):
+        S = y[0]
+        I_n = y[1]
+        H_r = y[2]
+        H_f = y[3]
+        R = y[4]
+        F = y[5]
+
+        I = I_n + H_r + H_f
+        self.beta_model = self.sigmoid(t)
+
+        ret = [
+            # S - Susceptible
+            -self.beta_model * I * S / self.S_0_model,
+
+            # I_n
+            (1 - self.rho) * self.beta_model * I * S / self.S_0_model  # (1-rho) BIS/N
+            - self.gamma_I_model * I_n,  # Gamma_I x I_n
+
+            # H_r
+            self.rho * (1 - self.delta_model) * self.beta_model * I * S / self.S_0_model  # rho * (1-delta) BIS/N
+            - self.gamma_H_model * H_r,
+
+            # H_f
+            self.rho * self.delta_model * self.beta_model * I * S / self.S_0_model  # rho * (delta) BIS/N
+            - self.omega_model * H_f,
+
+            # R
+            self.gamma_I_model * I_n  # gamma_I * In
+            + self.gamma_H_model * H_r,  # gamma_H * Hr
+
+            # F
+            self.omega_model * H_f,
+        ]
+
+        return ret
+
+    def estimate(self, verbose=True, options=None):
+        """
+        List of parameters to estimate:
+        * beta
+        * gamma I
+        * gamma H
+        * omega
+        * S0
+        * delta
+        * maybe I0 has to be initialized or estimated
+
+        Note: gamma bounds are applied to total gamma (gamma_I + (1-delta) gamma_H + delta omega)
+        """
+        self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
+        self.sig_normal_t = self.quarantine_loc + 7
+        betaBounds = self.betaBounds
+        S0pbounds = self.S0pbounds
+        gamma_i_bounds = self.gamma_i_bounds
+        gamma_h_bounds = self.gamma_h_bounds
+        omega_bounds = self.omega_bounds
+        deltaBounds = self.delta_bounds
+        lambdaBounds = self.lambda_bounds
+
+        constraints = [
+            {'type': 'ineq', 'fun': self.const_lowerBound_R0},
+            {'type': 'ineq', 'fun': self.const_upperBound_R0},
+            {'type': 'ineq', 'fun': self.const_lowerBound_gamma},
+            {'type': 'ineq', 'fun': self.const_upperBound_gamma},
+            {'type': 'ineq', 'fun': self.const_betas},
+        ]
+
+
+        optimal = minimize(
+            self.loss,
+            np.array([
+                0.2,  # beta1
+                0.2,  # beta2
+                .07,  # gamma I
+                0.07,  # gamma H
+                0.07,  # omega
+                .2,  # S0p
+                # None,  # S0p
+                0.05,  # delta
+                1,  # lambda
+            ]),
+            args=(),
+            method='SLSQP',
+            bounds=[
+                betaBounds,
+                betaBounds,
+                gamma_i_bounds,
+                gamma_h_bounds,
+                omega_bounds,
+                S0pbounds,
+                deltaBounds,
+                lambdaBounds,
+            ],
+            constraints=constraints,
+            options=options,
+        )
+        self.optimizer = optimal
+        beta1, beta2, gamma_I, gamma_H, omega, S_0p, delta, lamb = optimal.x
+
+        # NOTE this gamma formula only works because beta_IN = beta_H
+        gamma = (1-self.rho) * gamma_I + self.rho * ((1 - delta) * gamma_H + delta * omega)
+
+        S_0 = self.N * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
+
+        if verbose:
+            print("Beta1:{beta1} Beta2:{beta2} Gamma:{gamma} S_0:{S_0}".format(beta1=beta1, beta2=beta2, gamma=gamma, S_0=S_0))
+            print("Beta1:{value} ".format(value=beta1,))
+            print("Beta2:{value} ".format(value=beta2, ))
+            print("Gamma:{value} | {values2} days ".format(value=gamma, values2=1/gamma))
+            print("Gamma I:{value} | {values2} days".format(value=gamma_I, values2=1/gamma_I,))
+            print("Gamma H:{value} | {values2} days".format(value=gamma_H, values2=1/gamma_H))
+            print("Omega:{value} | {values2} days".format(value=omega, values2=1/omega))
+            print("S0:{value} ".format(value=S_0, ))
+            print("Delta:{value} ".format(value=delta, ))
+            print("Lambda:{value} ".format(value=lamb, ))
+
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.gamma = gamma
+        self.S_0 = S_0
+        self.gamma = gamma
+        self.gamma_I = gamma_I
+        self.gamma_H = gamma_H
+        self.omega = omega
+        self.delta = delta
+        self.lamb = lamb
+        self.R01 = self.beta1 / self.gamma
+        self.R02 = self.beta2 / self.gamma
+        if verbose:
+            print('R0_initial:{R0}'.format(R0=self.R01))
+            print('R0_quarantine:{R0}'.format(R0=self.R02))
+
+    def loss(self, point):
+        """
+        RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
+        """
+        size = self.I_actual.shape[0]
+        beta1, beta2, gamma_I, gamma_H, omega, S_0p, delta, lamb = point
+
+        gamma = (1-self.rho) * gamma_I + self.rho * ((1 - delta) * gamma_H + delta * omega) #TODO check gamma calc
+
+        self.gamma_model = gamma
+        self.beta1_model = beta1
+        self.beta2_model = beta2
+        self.gamma_I_model = gamma_I
+        self.gamma_H_model = gamma_H
+        self.omega_model = omega
+        self.delta_model = delta
+        self.lambda_model = lamb
+
+        self.S_0_model = self.N * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
+
+
+
+        # solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
+        solution = solve_ivp(self.model, [0, size], [self.S_0_model, self.I_n_0, self.H_r_0, self.H_f_0, self.R_0, self.F_0],
+                             t_eval=np.arange(0, size, 1), vectorized=True)
+
+        y = solution.y
+        S = y[0]
+        I_n = y[1]
+        H_r = y[2]
+        H_f = y[3]
+        R = y[4]
+        F = y[5]
+
+        I = I_n + H_r + H_f
+
+        # Put more emphasis on recovered people
+        alphas = self.alphas
+
+        l1 = np.sqrt(np.mean((I - self.I_actual) ** 2))
+        l2 = np.sqrt(np.mean((R - self.R_actual) ** 2))
+        l3 = np.sqrt(np.mean((F - self.F_actual) ** 2))
+
+        loss = alphas[0] * l1 + alphas[1] * l2 + alphas[2] * l3
+
+        # print(S_0p, loss)
+
+        return loss
+
+
+############## VISUALIZATION METHODS ################
+
+############## CONSTRAINT METHODS ################
+
+    def const_betas(self, point):
+        # print(locals())
+        # print(**kwargs)
+        # self.const_upperBoundR0_S0opt.__code__.co_varnames
+        beta1, beta2, gamma_I, gamma_H, omega, S_0p, delta, lamb = point
+        return beta1 - beta2
+
+    def const_lowerBound_gamma(self, point):
+        "constraint has to be R0 > bounds(0) value, thus (R0 - bound) > 0"
+
+        lowerBound = self.gammaBounds[0]
+
+        beta1, beta2, gamma_I, gamma_H, omega, S_0p, delta, lamb = point
+
+        gamma = gamma_I + (1-delta) * gamma_H + delta * omega
+
+        return gamma - lowerBound
+
+    def const_upperBound_gamma(self, point):
+
+        upperBound = self.gammaBounds[1]
+
+        beta1, beta2, gamma_I, gamma_H, omega, S_0p, delta, lamb = point
+
+        gamma = gamma_I + (1 - delta) * gamma_H + delta * omega
+
+        return upperBound - gamma
+
+    def const_lowerBound_R0(self, point):
+        "constraint has to be R0 > bounds(0) value, thus (R0 - bound) > 0"
+
+        lowerBound = self.R0bounds[0]
+
+        beta1, beta2, gamma_I, gamma_H, omega, S_0p, delta, lamb = point
+
+        gamma = gamma_I + (1 - delta) * gamma_H + delta * omega
+        R0_1 = beta1 / gamma
+        R0_2 = beta2 / gamma
+        return min(R0_1, R0_2) - lowerBound
+
+    def const_upperBound_R0(self, point):
+
+        upperBound = self.R0bounds[1]
+
+        beta1, beta2, gamma_I, gamma_H, omega, S_0p, delta, lamb = point
+
+        gamma = gamma_I + (1 - delta) * gamma_H + delta * omega
+        R0_1 = beta1 / gamma
+        R0_2 = beta2 / gamma
+        return upperBound - max(R0_1, R0_2)
+
 class SIR_sigmoid(SIR):
     """
     Implements a SIR with a time varying beta according to a sigmoid function
@@ -721,6 +993,7 @@ class SIR_sigmoid(SIR):
                  **kwargs):
         self.lambda_bounds = lambda_bounds
         super().__init__(**kwargs)
+
 
     def sigmoid(self, t):
         # Normalize t
@@ -742,6 +1015,7 @@ class SIR_sigmoid(SIR):
 
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
         self.sig_normal_t = self.quarantine_loc + 7
+
 
         betaBounds = self.betaBounds
         gammaBounds = self.gammaBounds
@@ -864,6 +1138,8 @@ class SIR_sigmoid(SIR):
         # self.const_upperBoundR0_S0opt.__code__.co_varnames
         beta1, beta2, lamb, gamma, S_0 = point
         return beta1 - beta2
+
+
 
 
 
@@ -1339,6 +1615,9 @@ if __name__ == '__main__':
     hospRate = 0.05
     # deltaUpperBound = 0.035 / hospRate
     deltaUpperBound = 79 / 165
+    gi = 0.07
+    gh = 0.07
+    omega = 0.07
 
     # Mudar omega bouds /
     NB = 16e6
@@ -1347,11 +1626,10 @@ if __name__ == '__main__':
                N=200e6,
                # N=1e6,
                alpha=.7,
-               S0pbounds=(NB * .25 / 200e6, NB / 200e6),
-               nth=20,
+               nth=100,
                daysToHosp=4,  # big for detction
                daysToLeave=12,
-               daysPredict=300,
+               daysPredict=150,
                infectedAssumption=1,
                # forcedBeta = 3,
                quarantineDate=dt.datetime(2020, 3, 24),  # italy lockdown was on the 9th
@@ -1361,27 +1639,51 @@ if __name__ == '__main__':
                hospRate=hospRate,
 
                # Usual restrictions
-               # delta_bounds=(0, deltaUpperBound),
-               # betaBounds=(0.1, 1.5),
-               # gammaBounds=(0.01, .2),
-               # gamma_i_bounds=(1/(5*7), 1/(1*7)),
-               # gamma_h_bounds=(1/(8*7), 1/(1*7)),
-               # omega_bounds=(1/(6*7), 1/(3*7)),
-
-               # Unrestricted
+               S0pbounds=(15e6 / 200e6, 15e6 / 200e6),
                delta_bounds=(0, deltaUpperBound),
-               betaBounds=(0.01, 0.5),
-               gammaBounds=(0.01, 1.0),
-               gamma_i_bounds=(0.01, .5),
-               gamma_h_bounds=(0.01, .5),
-               # omega_bounds=(0.01, .5),
+               betaBounds=(0.1, 1.5),
+               gammaBounds=(0.01, .2),
+               gamma_i_bounds=(1 / (5 * 7), 1 / (1 * 7)),
+               gamma_h_bounds=(1 / (8 * 7), 1 / (1 * 7)),
+               omega_bounds=(1 / (6 * 7), 1 / (3)),
+
+               # restricted
+               # S0pbounds=(.5e6 / 200e6, 50e6 / 200e6),
+               # delta_bounds=(deltaUpperBound, deltaUpperBound),
+               # betaBounds=(0.3, 0.3),
+               # gammaBounds=(0, 1),
+               # gamma_i_bounds=(gi, gi),
+               # gamma_h_bounds=(gh, gh),
+               # omega_bounds=(omega, omega),
 
                # omega_bounds=(1/12, 1/12),
-               alphas=(.1, 0, .9),
+               alphas=(.015, .0, .985),
                adjust_recovered=True,
                )
 
-    t1.train(options={'eps': 1e-2})
-
     t1.train()
-    t1.rollingHosp()
+    # options={'eps': 5e-3, }
+    # options={'eps': 1e-3, 'ftol': 1e-7}
+
+    # t1.main_plot()
+
+    print(t1.gamma_i_bounds)
+    print(t1.gamma_h_bounds)
+    print(t1.omega_bounds)
+    print('\nI Max:')
+    print(t1.df.I.max())
+    print('Est:')
+    print(t1.df.I.max() * .15)
+    print('H Max:')
+    print(t1.df['H'].max())
+    print('R Max:')
+    print(t1.df['R'].max())
+    print('F Max:')
+    print(t1.df['F'].max())
+    print('F+R Max:')
+    print(t1.df['F'].max() + t1.df['R'].max())
+    # (t1.df.S + t1.df.I + t1.df.R + t1.df.F)
+
+    # t1.optimizer
+    t1.rollingBetas()
+    # t1.rollingHospPlot()
