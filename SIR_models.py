@@ -7,6 +7,9 @@ import matplotlib.pyplot as plt
 from datetime import timedelta, datetime
 import datetime as dt
 
+yellow = (240/255, 203/255, 105/255)
+grey = (153/255, 153/255, 153/255)
+red = (220/255, 83/255, 86/255)
 
 class SIR(object):
     def __init__(self,
@@ -263,6 +266,36 @@ class SIR(object):
         self.rollingList.index = self.I_actual.index
         return self.rollingList
 
+    def outOfSample_forecast(self, cutDate=None, plot=True, days=14):
+
+        if not cutDate:
+            cutDate = self.F_actual.index[-1] + dt.timedelta(days=-days)
+
+        I_actual = self.I_actual.copy()
+        R_actual = self.R_actual.copy()
+        F_actual = self.F_actual.copy()
+
+        self.I_actual = I_actual.loc[:cutDate]
+        self.R_actual = R_actual.loc[:cutDate]
+        self.F_actual = F_actual.loc[:cutDate]
+
+        self.estimate(verbose=False)
+
+        self.predict()
+
+        self.forecast = self.df.copy()
+
+        self.I_actual = I_actual.copy()
+        self.R_actual = R_actual.copy()
+        self.F_actual = F_actual.copy()
+
+        print("MSE: {mse}".format(mse=((self.forecast.F - self.F_actual) ** 2).sum() ** .5))
+
+        if plot:
+            self.outOfSample_plot(cutDate, days=days)
+
+        # return self.forecast
+
 
 
 ############## CONSTRAINT METHODS ################
@@ -324,6 +357,19 @@ class SIR(object):
 
         if export:
             self.rollingList.to_excel('export_RollingBetas.xlsx')
+
+    def outOfSample_plot(self, cutDate=None, days=14):
+
+
+
+        # plot true data
+        self.F_actual.loc[:].plot(color=yellow, marker='o')
+
+        # plot forecast
+        self.forecast.loc[cutDate:(cutDate + dt.timedelta(days=days))].F.plot(color=grey)
+
+        # plot forecast scenarios (margins
+
 
 
 class SIHRF(SIR):
@@ -1652,22 +1698,22 @@ if __name__ == '__main__':
 
                        # Tight restrictions
                        # S0pbounds=(10e6 / N, 10e6 / N),
-                       # S0pbounds=(.015, .015),
-                       # delta_bounds=(0, deltaUpperBound),
-                       # betaBounds=(0.20, 1.5),
-                       # gammaBounds=(0.05, .15),
-                       # gamma_i_bounds=(1 / (14), 1 / (5)),
-                       # gamma_h_bounds=(1 / (6 * 7), 1 / (3 * 7)),
-                       # omega_bounds=(1 / (12), 1 / (3)),
+                       S0pbounds=(.015, .015),
+                       delta_bounds=(0, deltaUpperBound),
+                       betaBounds=(0.20, 1.5),
+                       gammaBounds=(0.05, .15),
+                       gamma_i_bounds=(1 / (14), 1 / (5)),
+                       gamma_h_bounds=(1 / (6 * 7), 1 / (3 * 7)),
+                       omega_bounds=(1 / (12), 1 / (3)),
 
                        # restricted - EM Algo
-                       S0pbounds=(10e6 / 200e6, 10e6 / 200e6),
-                       delta_bounds=(deltaUpperBound, deltaUpperBound),
-                       betaBounds=(0.2, 0.38564),
-                       gammaBounds=(0, 1),
-                       gamma_i_bounds=(0.1008, 0.1008),
-                       gamma_h_bounds=(0.02380, 0.02380),
-                       omega_bounds=(0.0833, 0.0833),
+                       # S0pbounds=(1e6 / 200e6, 50e6 / 200e6),
+                       # delta_bounds=(deltaUpperBound, deltaUpperBound),
+                       # betaBounds=(0.2, 0.4),
+                       # gammaBounds=(0, 1),
+                       # gamma_i_bounds=(1/(15), 1/(15)),
+                       # gamma_h_bounds=(1/(4*7), 1/(4*7)),
+                       # omega_bounds=(1/(10), 1/(10)),
 
                        # restricted
                        # S0pbounds=(.5e6 / 200e6, 50e6 / 200e6),
@@ -1679,8 +1725,9 @@ if __name__ == '__main__':
                        # omega_bounds=(omega, omega),
 
                        # omega_bounds=(1/12, 1/12),
-                       alphas=(.05, .05, .9),
+                       alphas=(0.025, 0.005, .97),
                        adjust_recovered=True,
                        )
 
     t1.train()
+    t1.outOfSample_forecast(dt.datetime(2020, 4, 1))
