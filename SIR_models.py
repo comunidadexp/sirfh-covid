@@ -15,8 +15,6 @@ class SIR(object):
     def __init__(self,
                  country='Brazil',
                  N=200e6,
-                 infectedAssumption=1,
-                 recoveredAssumption=1,
                  nth=1,
                  daysPredict=150,
                  quarantineDate=None,
@@ -25,28 +23,20 @@ class SIR(object):
                  gammaBounds=(0.00000001, 2.0),
                  S0pbounds=(10000, 10e6),
                  R0bounds=None,
-                 hospRate=0.15,
-                 daysToHosp=7,
-                 daysToLeave=7,
-                 opt='L-BFGS-B',
+                 hospitalization_rate=0.15,
                  adjust_recovered=False
                  ):
 
         self.country = country
-        self.N = N
-        self.infectedAssumption = infectedAssumption  # Multiplier to account for non reported
-        self.recoveredAssumption = recoveredAssumption
-        self.R_0th = nth  # minimum number of cases to start modelling
+        self.country_population = N
+        self.nth = nth  # minimum number of cases to start modelling
         self.daysPredict = daysPredict
         self.quarantineDate = quarantineDate
         self.alpha = alpha
         self.betaBounds = betaBounds
         self.gammaBounds = gammaBounds
         self.S0pbounds = S0pbounds
-        self.hospRate = hospRate
-        self.daysToHosp = daysToHosp
-        self.hospitalDuration = daysToLeave
-        self.opt = opt
+        self.hospitalization_rate = hospitalization_rate
         self.R0bounds = R0bounds
         self.adjust_recovered = adjust_recovered
 
@@ -73,22 +63,33 @@ class SIR(object):
         recovered.index = pd.to_datetime(recovered.index)
         self.recovered = recovered[self.country]
 
+    def load_population(self, dir="Population.xlsx"):
+        """
+        This function loads the country's population from an excel spreadsheet that should have a list of countries
+        on the first column and the population on the second. The sheet headers should be ´Country´ and ´Population´.
+
+        The function saves the population to ´self.country_population´
+
+        :param dir: path do file
+        :return: None
+        """
+
+        df = pd.read_excel(dir).set_index('Country')
+        self.country_population = df.loc[self.country][0]
+
     def load_data(self):
         """
         New function to use our prop data
         """
         self.load_CSSE()
+        self.load_population()
 
         # Adjust recovered curve
         if self.adjust_recovered:
             self.recovered = self.smoothCurve(self.recovered)
 
-        # Using unreported estimate
-        self.confirmed = self.confirmed * self.infectedAssumption
-        self.recovered = self.recovered * self.infectedAssumption * self.recoveredAssumption
-
         # find date in which nth case is reached
-        nth_index = self.confirmed[self.confirmed >= self.R_0th].index[0]
+        nth_index = self.confirmed[self.confirmed >= self.nth].index[0]
 
         if not self.quarantineDate:
             self.quarantineDate = self.confirmed.index[-1]
@@ -151,7 +152,7 @@ class SIR(object):
         )
         self.optimizer = optimal
         beta, gamma, S_0p = optimal.x
-        S_0 = S_0p * self.N
+        S_0 = S_0p * self.country_population
 
         if verbose:
             print("Beta:{beta} Gamma:{gamma} S_0:{S_0}".format(beta=beta, gamma=gamma, S_0=S_0))
@@ -182,7 +183,7 @@ class SIR(object):
 
         self.beta_model = beta
         self.gamma_model = gamma
-        self.S_0_model = self.N * S_0p
+        self.S_0_model = self.country_population * S_0p
 
         # solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
         solution = solve_ivp(self.model, [0, size], [self.S_0_model, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
@@ -238,15 +239,6 @@ class SIR(object):
 
         self.predict()
 
-    def calculateNB(self):
-        # Need of Beds
-        #X% of new cases need hospitalization after n days
-        #First tryout is right after new cases bluntly after n days
-        self.df['hospDemand'] = ((self.df['S'].shift(1) - self.df['S']) * self.hospRate).shift(self.daysToHosp).copy()
-        self.df['hospExpire'] = self.df['hospDemand'].shift(self.hospitalDuration).copy()
-        self.df['H'] = (self.df['hospDemand'].cumsum() - self.df['hospExpire'].cumsum()).copy()
-        self.df.drop(['hospDemand', 'hospExpire'], axis=1, inplace=True)
-
     def rollingBetas(self):
 
         betasList = []
@@ -289,12 +281,21 @@ class SIR(object):
         self.R_actual = R_actual.copy()
         self.F_actual = F_actual.copy()
 
-        print("MSE: {mse}".format(mse=((self.forecast.F - self.F_actual) ** 2).sum() ** .5))
+        # Calculate MSE
+        # Separate only the according values on the Dfs
+        mse_F_actual = self.F_actual.loc[cutDate:].copy().diff()
+        mse_F_forecast = self.forecast.F.loc[cutDate:].copy().diff()
+        # get the size of it
+        T = mse_F_actual.shape[0]
+
+        self.mse = (((mse_F_forecast - mse_F_actual) ** 2).sum() / T) ** .5
+
+        print("MSE: {mse}".format(mse=self.mse))
 
         if plot:
             self.outOfSample_plot(cutDate, days=days)
 
-        # return self.forecast
+        return self.mse
 
 
 
@@ -358,15 +359,22 @@ class SIR(object):
         if export:
             self.rollingList.to_excel('export_RollingBetas.xlsx')
 
-    def outOfSample_plot(self, cutDate=None, days=14):
+    def outOfSample_plot(self, cutDate=None, days=14, diff=False):
 
+        if not cutDate:
+            cutDate = self.F_actual.index[-1] + dt.timedelta(days=-days)
 
+        actual = self.F_actual.loc[:].copy()
+        forecast = self.forecast.loc[cutDate:(cutDate + dt.timedelta(days=days))].F.copy()
 
+        if diff:
+            actual = actual.diff()
+            forecast = forecast.diff()
         # plot true data
-        self.F_actual.loc[:].plot(color=yellow, marker='o')
+        actual.plot(color=yellow, marker='o')
 
         # plot forecast
-        self.forecast.loc[cutDate:(cutDate + dt.timedelta(days=days))].F.plot(color=grey)
+        forecast.plot(color=grey)
 
         # plot forecast scenarios (margins
 
@@ -515,7 +523,7 @@ class SIHRF(SIR):
         # NOTE this gamma formula only works because beta_IN = beta_H
         gamma = (1-self.rho) * gamma_I + self.rho * ((1 - delta) * gamma_H + delta * omega)
 
-        S_0 = self.N * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
+        S_0 = self.country_population * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
 
         if verbose:
             print("Beta:{beta} Gamma:{gamma} S_0:{S_0}".format(beta=beta, gamma=gamma, S_0=S_0))
@@ -564,7 +572,7 @@ class SIHRF(SIR):
         self.gamma_H_model = gamma_H
         self.omega_model = omega
         self.delta_model = delta
-        self.S_0_model = self.N * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
+        self.S_0_model = self.country_population * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
 
 
 
@@ -783,9 +791,22 @@ class SIHRF_Sigmoid(SIHRF):
     """
     def __init__(self,
                  lambda_bounds=(0.25, 4),
+                 beta1_bounds=None,
+                 beta2_bounds=None,
                  **kwargs):
         self.lambda_bounds = lambda_bounds
+
         super().__init__(**kwargs)
+
+        if not beta1_bounds:
+            self.beta1_bounds = self.betaBounds
+        else:
+            self.beta1_bounds = beta1_bounds
+
+        if not beta2_bounds:
+            self.beta2_bounds = self.betaBounds
+        else:
+            self.beta2_bounds = beta2_bounds
 
     def sigmoid(self, t):
         # Normalize t
@@ -829,7 +850,7 @@ class SIHRF_Sigmoid(SIHRF):
 
         return ret
 
-    def estimate(self, verbose=True, options=None):
+    def estimate(self, verbose=True, options=None, lossFunc=None):
         """
         List of parameters to estimate:
         * beta
@@ -842,9 +863,14 @@ class SIHRF_Sigmoid(SIHRF):
 
         Note: gamma bounds are applied to total gamma (gamma_I + (1-delta) gamma_H + delta omega)
         """
+        if not lossFunc:
+            lossFunc = self.loss
+
+        if lossFunc == 'rmse':
+            lossFunc = self.outOfSample_loss
+
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantineDate))
         self.sig_normal_t = self.quarantine_loc + 7
-        betaBounds = self.betaBounds
         S0pbounds = self.S0pbounds
         gamma_i_bounds = self.gamma_i_bounds
         gamma_h_bounds = self.gamma_h_bounds
@@ -862,7 +888,7 @@ class SIHRF_Sigmoid(SIHRF):
 
 
         optimal = minimize(
-            self.loss,
+            lossFunc,
             np.array([
                 0.2,  # beta1
                 0.2,  # beta2
@@ -877,8 +903,8 @@ class SIHRF_Sigmoid(SIHRF):
             args=(),
             method='SLSQP',
             bounds=[
-                betaBounds,
-                betaBounds,
+                self.beta1_bounds,
+                self.beta2_bounds,
                 gamma_i_bounds,
                 gamma_h_bounds,
                 omega_bounds,
@@ -895,7 +921,7 @@ class SIHRF_Sigmoid(SIHRF):
         # NOTE this gamma formula only works because beta_IN = beta_H
         gamma = (1-self.rho) * gamma_I + self.rho * ((1 - delta) * gamma_H + delta * omega)
 
-        S_0 = self.N * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
+        S_0 = self.country_population * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
 
         if verbose:
             print("Beta1:{beta1} Beta2:{beta2} Gamma:{gamma} S_0:{S_0}".format(beta1=beta1, beta2=beta2, gamma=gamma, S_0=S_0))
@@ -943,7 +969,7 @@ class SIHRF_Sigmoid(SIHRF):
         self.delta_model = delta
         self.lambda_model = lamb
 
-        self.S_0_model = self.N * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
+        self.S_0_model = self.country_population * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
 
 
 
@@ -982,6 +1008,77 @@ class SIHRF_Sigmoid(SIHRF):
 
         return loss
 
+    def outOfSample_loss(self, S0p):
+
+        self.S0pbounds = (S0p, S0p)
+
+        return self.outOfSample_forecast()
+
+    def outOfSample_train(self, cutDate=None, days=7):
+
+        if not cutDate:
+            cutDate = self.F_actual.index[-1] + dt.timedelta(days=-days)
+
+        # Lock and backup S0
+        S0_initital_guess = 0.05
+        bkp_S0_bounds = self.S0pbounds
+        self.S0pbounds = (S0_initital_guess, S0_initital_guess)
+
+        self.estimate(verbose=False)
+        #release lock
+        self.S0pbounds = bkp_S0_bounds
+
+        # Create new object with the locked parameters
+        newObj = SIHRF_Sigmoid(
+            country=self.country,
+            N=self.country_population,
+            nth=self.nth,
+            quarantineDate=self.quarantineDate,
+            hospRate=self.hospitalization_rate,
+            alphas=self.alphas,
+            adjust_recovered=self.adjust_recovered,
+
+            beta1_bounds=(self.beta1, self.beta1),
+            beta2_bounds=(self.beta2, self.beta2),
+            delta_bounds=(self.delta, self.delta),
+            gamma_i_bounds=(self.gamma_I, self.gamma_I),
+            gamma_h_bounds=(self.gamma_H, self.gamma_H),
+            omega_bounds=(self.omega, self.omega),
+            lambda_bounds=(self.lambda_bounds, self.lambda_bounds),
+
+            S0pbounds=self.S0pbounds,
+
+        )
+
+        # minimize out of sample forecast RMSE
+
+        optimal = minimize(
+            self.outOfSample_loss,
+            np.array([
+                0.05
+            ]),
+            args=(),
+            method='SLSQP',
+            bounds=[
+                self.S0pbounds
+            ],
+        )
+        self.optimizer = optimal
+        S_0p, = optimal.x
+
+        S_0 = self.country_population * S_0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
+
+        print("S0p new estimate")
+        print("S0: {S0}".format(S0=self.S_0))
+
+        # Release locks
+        self.delta_bounds = bkp_delta_bounds
+        self.beta1_bounds = bkp_betaBounds
+        self.beta2_bounds = bkp_gamma_i_bounds
+        self.gamma_i_bounds = bkp_gamma_i_bounds
+        self.gamma_h_bounds = bkp_gamma_h_bounds
+        self.omega_bounds = bkp_omega_bounds
+        self.lambda_bounds = bkp_lambda_bounds
 
 ############## VISUALIZATION METHODS ################
 
@@ -1095,7 +1192,7 @@ class SIR_sigmoid(SIR):
         )
         self.optimizer = optimal
         beta1, beta2, lamb, gamma, S_0p = optimal.x
-        S_0 = self.N * S_0p
+        S_0 = self.country_population * S_0p
         if verbose:
             print("Beta1:{beta1} Beta2:{beta2} Lambda:{lamb} Gamma:{gamma} S_0:{S_0}".format(beta1=beta1, beta2=beta2,
                                                                                              lamb=lamb, gamma=gamma, S_0=S_0))
@@ -1122,7 +1219,7 @@ class SIR_sigmoid(SIR):
         self.beta2_model = beta2
         self.lambda_model = lamb
         self.gamma_model = gamma
-        self.S_0_model = self.N * S_0p
+        self.S_0_model = self.country_population * S_0p
 
         # solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
         solution = solve_ivp(self.model, [0, size], [self.S_0_model, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
@@ -1245,7 +1342,7 @@ class SEIR(SIR):
         l1 = np.sqrt(np.mean((solution.y[2] - self.I_actual) ** 2))
         l2 = np.sqrt(np.mean((solution.y[3] - self.R_actual) ** 2))
 
-        return alpha * l1 + (1 - alpha) * l2
+        return alpha[0] * l1 + alpha[1] * l2
 
     def predict(self, beta=None, gamma=None):
         """
