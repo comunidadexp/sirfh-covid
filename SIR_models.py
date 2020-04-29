@@ -474,6 +474,67 @@ class SIR(object):
 
         return self.mse
 
+    def outOfSample_forecast_scenarios(self, cutDate=None, diff=False, days=14, scenarios=[.005, .01, .015]):
+
+        if not cutDate:
+            cutDate = self.F_actual.index[-1] + dt.timedelta(days=-days)
+
+        scenarios_forecast = []
+
+        # Estimate a new scenario for each `S0p` in `scenarios`
+        # Try to estimate model and keep parameters changing only S0p
+
+
+        for scenario in scenarios:
+            new_args = self.all_attributes.copy()
+            new_args['cut_sample_date'] = cutDate
+            new_args['force_parameters']['S0p'] = scenario
+
+            estimator = self.create_new_object(self.model_type, new_args)
+            estimator.train()
+
+            scenario_forecast = estimator.df.copy().F
+
+            # if we are looking for past out of sample forecasts, we don't need the entire projection window.
+            # If we are looking for future forecasts, we can leave the entire window.
+            if days > 0:
+                scenario_forecast.reindex(self.F_actual.index)
+
+            scenarios_forecast.append(scenario_forecast)
+
+        # # Calculate MSE
+        # self.mse = self.calculate_rmse(self.F_actual, self.forecast.F, cutDate, verbose=True)
+
+        ########## PLOT ################
+
+        actual = self.F_actual.copy()
+
+        if diff:
+            actual = actual.diff()
+            for i in range(len(scenarios_forecast)):
+                scenarios_forecast[i] = scenarios_forecast[i].diff()
+
+        forecast_outOfSample = scenarios_forecast[1].loc[cutDate:(cutDate + dt.timedelta(days=days))].copy()
+        forecast_inSample = scenarios_forecast[1].loc[:cutDate].copy()
+
+        lowerBound = scenarios_forecast[0].loc[cutDate:(cutDate + dt.timedelta(days=days))].copy()
+        upperBound = scenarios_forecast[2].loc[cutDate:(cutDate + dt.timedelta(days=days))].copy()
+
+        # plot true data
+        axes = actual.plot(color=yellow, marker='o')
+        fig = axes.get_figure()
+
+        # plot forecast
+        forecast_outOfSample.plot(color=grey, marker='o')
+        forecast_inSample.plot(color=grey)
+
+        # plot forecast scenarios (margins
+        axes.fill_between(forecast_outOfSample.index, lowerBound, upperBound,
+                          facecolor=faded_grey)
+
+        # return self.mse
+        return True
+
     def outOfSample_forecast_S0(self, cutDate=None, plot=True, days=14, k=1):
 
         if not cutDate:
@@ -687,6 +748,7 @@ class SIR(object):
 
         # plot forecast scenarios (margins
         axes.fill_between(forecast_outOfSample.index, forecast_outOfSample - k * std, forecast_outOfSample + k * std, facecolor=faded_grey)
+        # return forecast_outOfSample
 
     def print_parameters(self):
 
@@ -849,6 +911,51 @@ class SIRFH(SIR):
         return self.country_population * S0p - self.I_0 - self.H_0 - self.R_0 - self.F_0
 
     def loss(self, point):
+        """
+        RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
+        """
+        size = self.I_actual.shape[0]
+        self.model_params = self.wrap_parameters(point)
+
+        S0 = self.calculateS0(self.model_params['S0p'])
+
+        # solution = solve_ivp(SIR, [0, size], [S_0, self.I_0, self.R_0], t_eval=np.arange(0, size, 1), vectorized=True)
+        solution = solve_ivp(self.model, [0, size], [S0, self.I_n_0, self.H_r_0, self.H_f_0, self.R_0, self.F_0],
+                             t_eval=np.arange(0, size, 1), vectorized=True)
+
+        y = solution.y
+        S = y[0]
+        I_n = y[1]
+        H_r = y[2]
+        H_f = y[3]
+        R = y[4]
+        F = y[5]
+
+        I = I_n + H_r + H_f
+
+        alphas = self.alpha
+
+        # l1 = ((I - self.I_actual) / self.I_actual) ** 2
+        l1 = (np.diff(I, prepend=np.nan) - self.I_actual.diff()) ** 2
+        l1.replace([np.inf, -np.inf, np.nan], 0, inplace=True)
+        l1 = np.sqrt(np.mean(l1))
+
+        # l2 = ((R - self.R_actual) / self.R_actual) ** 2
+        l2 = (np.diff(R, prepend=np.nan) - self.R_actual.diff()) ** 2
+        l2.replace([np.inf, -np.inf, np.nan], 0, inplace=True)
+        l2 = np.sqrt(np.mean(l2))
+
+        # l3 = ((F - self.F_actual) / self.F_actual) ** 2
+        l3 = (np.diff(F, prepend=np.nan) - self.F_actual.diff()) ** 2
+        l3.replace([np.inf, -np.inf, np.nan], 0, inplace=True)
+        l3 = np.sqrt(np.mean(l3))
+
+        loss = alphas[0] * l1 + alphas[1] * l2 + alphas[2] * l3
+        # loss = l3
+
+        return loss
+
+    def loss_level(self, point):
         """
         RMSE between actual confirmed cases and the estimated infectious people with given beta and gamma.
         """
@@ -1208,14 +1315,17 @@ class SIRFH_Sigmoid(SIRFH):
 
 
 if __name__ == '__main__':
+    cutDate = dt.datetime(2020, 3, 18)
+
     hospRate = 0.05
     deltaUpperBound = 79 / 165
 
-    t1 = SIRFH_Sigmoid(country='Korea, South',
+    t1 = SIRFH_Sigmoid(country='Spain',
                        # quarantineDate = dt.datetime(2020,3,24), #italy lockdown was on the 9th
                        hospitalization_rate=hospRate,
-                       alpha=[.5, 0.00, .5],
+                       alpha=[.000, .000, .9998],
 
+                       cut_sample_date=cutDate,
                        # Loose restrictions
                        # S0pbounds=(10e6 / 200e6, 10e6 / 200e6),
                        # delta_bounds=(0, deltaUpperBound),
@@ -1240,13 +1350,13 @@ if __name__ == '__main__':
                        },
 
                        parameter_bounds={
-                           'S0p': (.0002, .2),
+                           'S0p': (.0001, .02),
                            #    'delta': (0, deltaUpperBound),
                            #    'beta1': (0.20, 1.5),
                            #    'beta2': (0.20, 1.5),
-                           #    'gamma_i': (1/(14), 1/(5)),
-                           #    'gamma_h': (1/(6*7), 1/(3*7)),
-                           #    'omega': (1/(7), 1/(3)),
+                           'gamma_i': (1 / (14), 1 / (4)),
+                           'gamma_h': (1 / (6.5 * 7), 1 / (2.5 * 7)),
+                           'omega': (1 / (21), 1 / (5)),
                            #    'lambda': (.5,2)
 
                        },
@@ -1255,24 +1365,8 @@ if __name__ == '__main__':
                            'R0': (1, 4),
                        },
 
-                       # restricted - EM Algo
-                       # S0pbounds=(1e6 / 200e6, 50e6 / 200e6),
-                       # delta_bounds=(deltaUpperBound, deltaUpperBound),
-                       # betaBounds=(0.2, 0.4),
-                       # gammaBounds=(0, 1),
-                       # gamma_i_bounds=(1/(15), 1/(15)),
-                       # gamma_h_bounds=(1/(4*7), 1/(4*7)),
-                       # omega_bounds=(1/(10), 1/(10)),
-
-                       # restricted
-                       # S0pbounds=(.5e6 / 200e6, 50e6 / 200e6),
-                       # delta_bounds=(deltaUpperBound, deltaUpperBound),
-                       # betaBounds=(0.4, 0.2),
-                       # gammaBounds=(0, 1),
-                       # gamma_i_bounds=(gi, gi),
-                       # gamma_h_bounds=(gh, gh),
-                       # omega_bounds=(omega, omega),
                        )
 
-    t1.train_S0()
-    t1.outOfSample_forecast_S0(days=30)
+    # t1.train_S0()
+    t1.train()
+    t1.outOfSample_forecast_scenarios(diff=True)
