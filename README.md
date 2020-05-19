@@ -29,4 +29,4 @@ The proposed model has the following advantages:
 * It adds a time-dynamic to the *beta* coefficient, so that it fastly adapts to the lockdown regime change.
 
 # Model
-<img src="https://render.githubusercontent.com./render/math?math=\beta_test">
+<img src="https://render.githubusercontent.com/render/math?math=\beta_test = 4">
