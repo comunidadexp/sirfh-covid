@@ -150,10 +150,13 @@ class SIR(object):
 
     def cut_sample(self):
 
-        if self.cut_sample_date:
+        cutDate = self.cut_sample_date
+        if cutDate:
+            if not isinstance(cutDate, dt.datetime):
+                cutDate = self.I_actual.index[-1] + dt.timedelta(days=-cutDate)
             # cutDate = self.F_actual.index[-1] + dt.timedelta(days=-days)
-            self.I_actual = self.I_actual.loc[:self.cut_sample_date]
-            self.R_actual = self.R_actual.loc[:self.cut_sample_date]
+            self.I_actual = self.I_actual.loc[:cutDate].copy()
+            self.R_actual = self.R_actual.loc[:cutDate].copy()
             # self.F_actual = self.F_actual.loc[:self.cut_sample_date]
 
     def set_default_bounds(self):
@@ -419,7 +422,12 @@ class SIR(object):
         Run the optimization to estimate parameters fitting real cases
         """
 
-        self.estimate(options=options, loss_func=loss_func, verbose=verbose)
+        if self.variable_parameters_list:
+            self.estimate(options=options, loss_func=loss_func, verbose=verbose)
+        else:
+            self.params = self.force_parameters.copy()
+            self.model_params = self.params.copy()
+
 
         self.predict()
 
@@ -474,30 +482,45 @@ class SIR(object):
 
         return self.mse
 
-    def outOfSample_forecast_scenarios(self, cutDate=None, diff=False, days=14, scenarios=[.005, .01, .015]):
+    def plot_forecast(self, ax, diff, window, scenarios, cutDate=None, verbose=False):
 
         if not cutDate:
-            cutDate = self.F_actual.index[-1] + dt.timedelta(days=-days)
+            cutDate = self.F_actual.index[-1] + dt.timedelta(days=-window)
 
         scenarios_forecast = []
 
         # Estimate a new scenario for each `S0p` in `scenarios`
-        # Try to estimate model and keep parameters changing only S0p
+        # estimate optimal parameters
+        new_args = self.all_attributes.copy()
+        new_args['cut_sample_date'] = cutDate
 
+        estimator = self.create_new_object(self.model_type, new_args)
+        estimator.train(verbose=verbose)
+        optimal_parameters = estimator.params.copy()
 
         for scenario in scenarios:
             new_args = self.all_attributes.copy()
             new_args['cut_sample_date'] = cutDate
+            new_args['force_parameters'] = optimal_parameters.copy()
+
+            # new_args['parameter_bounds']['delta'] = (optimal_parameters['delta'], optimal_parameters[
+            #     'delta'])  # little trick because fixing all parameters crashes
+            # del new_args['force_parameters']['delta']
+
+            # new_args['parameter_bounds']['lambda'] = (optimal_parameters['lambda'], optimal_parameters[
+            #     'lambda'])  # little trick because fixing all parameters crashes
+            # del new_args['force_parameters']['lambda']
+
             new_args['force_parameters']['S0p'] = scenario
 
             estimator = self.create_new_object(self.model_type, new_args)
-            estimator.train()
+            estimator.train(verbose=verbose)
 
             scenario_forecast = estimator.df.copy().F
 
             # if we are looking for past out of sample forecasts, we don't need the entire projection window.
             # If we are looking for future forecasts, we can leave the entire window.
-            if days > 0:
+            if window > 0:
                 scenario_forecast.reindex(self.F_actual.index)
 
             scenarios_forecast.append(scenario_forecast)
@@ -514,25 +537,64 @@ class SIR(object):
             for i in range(len(scenarios_forecast)):
                 scenarios_forecast[i] = scenarios_forecast[i].diff()
 
-        forecast_outOfSample = scenarios_forecast[1].loc[cutDate:(cutDate + dt.timedelta(days=days))].copy()
+        forecast_outOfSample = scenarios_forecast[1].loc[cutDate:(cutDate + dt.timedelta(days=window))].copy()
         forecast_inSample = scenarios_forecast[1].loc[:cutDate].copy()
 
-        lowerBound = scenarios_forecast[0].loc[cutDate:(cutDate + dt.timedelta(days=days))].copy()
-        upperBound = scenarios_forecast[2].loc[cutDate:(cutDate + dt.timedelta(days=days))].copy()
+        lowerBound = scenarios_forecast[0].loc[cutDate:(cutDate + dt.timedelta(days=window))].copy()
+        upperBound = scenarios_forecast[2].loc[cutDate:(cutDate + dt.timedelta(days=window))].copy()
 
         # plot true data
-        axes = actual.plot(color=yellow, marker='o')
-        fig = axes.get_figure()
+        actual.plot(color=yellow, marker='o', ax=ax, label='True data')
 
         # plot forecast
-        forecast_outOfSample.plot(color=grey, marker='o')
-        forecast_inSample.plot(color=grey)
+        forecast_outOfSample.plot(color=grey, marker='o', ax=ax, label='Out-of-sample forecast')
+        forecast_inSample.plot(color=grey, ax=ax, label='In-sample forecast')
 
         # plot forecast scenarios (margins
-        axes.fill_between(forecast_outOfSample.index, lowerBound, upperBound,
+        ax.fill_between(forecast_outOfSample.index, lowerBound, upperBound,
                           facecolor=faded_grey)
+        ax.legend()
+        df = pd.concat([actual, forecast_outOfSample, forecast_inSample, lowerBound, upperBound], axis=1)
+        df.columns = ['Actual', 'Forecast_outOfSample', 'Forecast_inSample', 'lowerBound', 'upperBound']
+        df.to_excel(".\Exports\{country}_forecast_{days}days_diff_{diff}.xlsx".format(country=self.country,
+                                                                            days=window, diff=diff,))
 
-        # return self.mse
+    def outOfSample_forecast_scenarios(self, cutDate=None, days=[7, 14], scenarios=[.005, .01, .015], verbose=False, figsize=(15,10)):
+
+        method = 'Standard Scenarios'
+        if scenarios == 'estimate':
+            method = 'Estimated Scenarios'
+            new_args = self.all_attributes.copy()
+            new_args['cut_sample_date'] = cutDate
+
+            estimator = self.create_new_object(self.model_type, new_args)
+            estimator.train(verbose=verbose)
+            S0p_estimate = estimator.params.copy()['S0p']
+            if S0p_estimate >= 0.006:
+                scenarios = [S0p_estimate-0.005, S0p_estimate, S0p_estimate + 0.005]
+            else:
+                scenarios = [S0p_estimate * .8, S0p_estimate, S0p_estimate * 1.2]
+
+            print(scenarios)
+
+        n_subplots = len(days)
+
+        fig, axes = plt.subplots(nrows=n_subplots, ncols=2, figsize=figsize)
+
+        for i in range(n_subplots):
+            window = days[i]
+            axes[i, 0].set_title('Fatalities forecast - {window} days ahead'.format(window=window))
+            axes[i, 1].set_title('Daily fatalities forecast - {window} days ahead'.format(window=window))
+            self.plot_forecast(ax=axes[i, 0], diff=False, window=window, scenarios=scenarios, cutDate=cutDate, verbose=verbose)
+            self.plot_forecast(ax=axes[i, 1], diff=True, window=window, scenarios=scenarios, cutDate=cutDate, verbose=verbose)
+
+        plt.tight_layout()
+        fig.suptitle('{model} - {country} - Out-of-sample forecasts\nMethod: {method}'.format(model=self.model_type,
+                                                                            country=self.country, method=method),
+                     fontsize=16, y=1.05)
+
+        plt.savefig(".\Exports\{country}_outOfSample_forecast.png".format(country=self.country), bbox_inches='tight')
+
         return True
 
     def outOfSample_forecast_S0(self, cutDate=None, plot=True, days=14, k=1):
@@ -745,6 +807,7 @@ class SIR(object):
         # plot forecast
         forecast_outOfSample.plot(color=grey, marker='o')
         forecast_inSample.plot(color=grey)
+        # pd.DataFrame([forecast_outOfSample, forecast_inSample])
 
         # plot forecast scenarios (margins
         axes.fill_between(forecast_outOfSample.index, forecast_outOfSample - k * std, forecast_outOfSample + k * std, facecolor=faded_grey)
@@ -860,11 +923,14 @@ class SIRFH(SIR):
 
     def cut_sample(self):
 
-        if self.cut_sample_date:
-            # cutDate = self.F_actual.index[-1] + dt.timedelta(days=-days)
-            self.I_actual = self.I_actual.loc[:self.cut_sample_date]
-            self.R_actual = self.R_actual.loc[:self.cut_sample_date]
-            self.F_actual = self.F_actual.loc[:self.cut_sample_date]
+        cutDate = self.cut_sample_date
+        if cutDate:
+            if not isinstance(cutDate, dt.datetime):
+                cutDate = self.I_actual.index[-1] + dt.timedelta(days=-cutDate)
+
+            self.I_actual = self.I_actual.loc[:cutDate].copy()
+            self.R_actual = self.R_actual.loc[:cutDate].copy()
+            self.F_actual = self.F_actual.loc[:cutDate].copy()
 
     def load_data(self):
         """
@@ -1063,6 +1129,161 @@ class SIRFH(SIR):
         self.rollingHospList.index = self.I_actual.index
         return self.rollingHospList
 
+    def rolling_peak(self, figsize=(15, 8)):
+        """
+        This function estimates the fatalities peak with an ever-increasing data window.
+        :return:
+        """
+
+        params_list = []
+
+        # for cutDate in self.confirmed.index:
+        for cutDate in self.I_actual.index:
+
+            new_args = self.all_attributes.copy()
+            new_args['cut_sample_date'] = cutDate
+
+            estimator = self.create_new_object(self.model_type, new_args)
+            estimator.train(verbose=False)
+            # optimal_parameters = estimator.params.copy()
+
+            current_peak = estimator.df.index[estimator.df.diff().F_Actual == estimator.df.F_Actual.diff().max()]
+            if current_peak.shape[0] > 0:
+                current_peak = current_peak[0]
+            else:
+                current_peak = np.nan
+
+            estimated_peak = estimator.df.index[estimator.df.diff().F == estimator.df.diff().F.max()]
+            if estimated_peak.shape[0] > 0:
+                estimated_peak = estimated_peak[0]
+            else:
+                estimated_peak = np.nan
+
+            params_list.append({
+                'Current peak': current_peak,
+                'Estimated peak': estimated_peak,
+            })
+
+        self.rolling_peak_df = pd.DataFrame(params_list, index=self.I_actual.index)
+        self.rolling_peak_df.fillna(method='bfill', inplace=True)
+        self.rolling_peak_df.fillna(method='ffill', inplace=True)
+
+        self.rolling_peak_df = self.rolling_peak_df.iloc[1:]
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        # Cut data on the peak date
+        peak_date = pd.Series([self.rolling_peak_df['Current peak'].iloc[-1],
+                               self.rolling_peak_df['Estimated peak'].iloc[-1]])
+
+        peak_date = peak_date.max()
+
+        self.rolling_peak_df = self.rolling_peak_df.loc[:peak_date]
+
+        self.rolling_peak_df['Estimated peak'].plot(axes=ax, color=yellow, marker='o', label='Estimated')
+        self.rolling_peak_df['Current peak'].plot(axes=ax, color=grey, marker='o', label='Current')
+
+        self.rolling_peak_df['Peak max'] = self.rolling_peak_df['Current peak'].max()
+
+        ax.axhline(y=self.rolling_peak_df['Current peak'].max(), color='black', linestyle='--', label='True peak')
+        ax.legend()
+
+        self.rolling_peak_df['UB'] = self.rolling_peak_df['Current peak'].max() + dt.timedelta(days=5)
+        self.rolling_peak_df['LB'] = self.rolling_peak_df['Current peak'].max() + dt.timedelta(days=-5)
+
+        ax.fill_between(self.rolling_peak_df['Current peak'].index,
+                          self.rolling_peak_df['LB'],
+                          self.rolling_peak_df['UB'],
+                          facecolor=faded_grey)
+
+        plt.tight_layout()
+        fig.suptitle('Fatality peak forecast - {country}'.format(model=self.model_type, country=self.country,),
+                     fontsize=16, y=1.05)
+
+        plt.savefig(".\Exports\{country}_rolling_peak.png".format(country=self.country), bbox_inches='tight')
+
+        export_df = self.rolling_peak_df[['Current peak', 'Estimated peak', 'LB', 'UB', 'Peak max']].copy()
+        export_df.to_excel(".\Exports\{country}_rolling_peak_dates.xlsx".format(
+            country=self.country))
+
+        export_df = export_df - self.F_actual.index[0]
+        export_df = export_df / np.timedelta64(1, 'D')
+
+        export_df.index = (export_df.index - self.F_actual.index[0]) / np.timedelta64(1, 'D')
+
+        export_df.to_excel(".\Exports\{country}_rolling_peak.xlsx".format(
+            country=self.country))
+
+        return self.rolling_peak_df
+
+    def rolling_n_fatal(self, nfatal=[50, 100], figsize=(15, 8)):
+        """
+        This function creates the rolling estimate of the date in which the model indicates less than `n` daily fatalities
+        :return:
+        """
+
+        params_list = []
+
+        for cutDate in self.I_actual.index:
+        # for cutDate in self.confirmed.index:
+
+            new_args = self.all_attributes.copy()
+            new_args['cut_sample_date'] = cutDate
+
+            estimator = self.create_new_object(self.model_type, new_args)
+            estimator.train(verbose=False)
+
+            # get the date with less than n daily fatalities after the peak
+            # find peak
+            peak = estimator.df.index[estimator.df.diff().F == estimator.df.F.diff().max()]
+
+            dic = {}
+
+            if peak.shape[0] > 0:
+                peak_i = peak[0]
+                analysis_period = estimator.df.diff().F.loc[peak_i:]
+                current_estimate = analysis_period.index[analysis_period <= nfatal[0]]
+                current_estimate = current_estimate[0]
+            else:
+                current_estimate = np.nan
+
+            dic["n={n}".format(n=nfatal[0])] = current_estimate
+
+            if peak.shape[0] > 0:
+                peak_i = peak[0]
+                analysis_period = estimator.df.diff().F.loc[peak_i:]
+                current_estimate = analysis_period.index[analysis_period <= nfatal[1]]
+                current_estimate = current_estimate[0]
+            else:
+                current_estimate = np.nan
+
+            dic["n={n}".format(n=nfatal[1])] = current_estimate
+
+
+            params_list.append(dic)
+
+        self.rolling_peak_df = pd.DataFrame(params_list, index=self.I_actual.index)
+        self.rolling_peak_df.fillna(method='bfill', inplace=True)
+        self.rolling_peak_df.fillna(method='ffill', inplace=True)
+
+        self.rolling_peak_df = self.rolling_peak_df.iloc[1:]
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        self.rolling_peak_df["n={n}".format(n=nfatal[0])].plot(axes=ax, color=yellow, marker='o', label="n={n}".format(n=nfatal[0]))
+        self.rolling_peak_df["n={n}".format(n=nfatal[1])].plot(axes=ax, color=grey, marker='o', label="n={n}".format(n=nfatal[1]))
+
+        # ax.axhline(y=self.rolling_peak_df['Current peak'].max(), color='black', linestyle='--', label='True peak')
+        ax.legend()
+
+        plt.tight_layout()
+        fig.suptitle('Daily Deaths Forecast - {country}'.format(model=self.model_type, country=self.country,),
+                     fontsize=16, y=1.05)
+
+        plt.savefig(".\Exports\{country}_rolling_n_fatal.png".format(country=self.country), bbox_inches='tight')
+
+        return self.rolling_peak_df
+
 ############## VISUALIZATION METHODS ################
     def main_plot(self):
         fig, ax = plt.subplots(figsize=(15, 10))
@@ -1131,6 +1352,71 @@ class SIRFH(SIR):
         print("gamma_i: {value} days".format(value= 1 / self.params['gamma_i']))
         print("gamma_h: {value} days".format(value=1 / self.params['gamma_h']))
         print("omega: {value} days".format(value=1 / self.params['omega']))
+
+    def plot_main_forecasts(self,  figsize=(15, 5),):
+
+        fig, axes = plt.subplots(nrows=1, ncols=2, figsize=figsize)
+
+        axes[0].set_title('Daily Fatalities fit')
+        axes[1].set_title('Total Fatalities fit')
+
+        ax = axes[1]
+        self.df['F_Actual'].plot(ax=ax, color=grey, label='Fatalities')
+        self.df['F'].plot(ax=ax, color=yellow, label='Forecast fatalities')
+
+        self.df[['F_Actual', 'F']].to_excel(".\Exports\{country}_HF_level.xlsx".format(country=self.country))
+
+        ax.legend()
+
+        ax = axes[0]
+        self.df['F'].diff().plot(ax=ax, color=grey, label='Forecast fatalities')
+        self.df['F_Actual'].diff().plot(ax=ax, color=yellow, label='Fatalities')
+        df = self.df.copy()
+        df['F'] = df['F'].diff()
+        df['F_Actual'] = df['F_Actual'].diff()
+        df[['F', 'F_Actual']].to_excel(".\Exports\{country}_HF_diff.xlsx".format(country=self.country))
+
+        ax.legend()
+
+        plt.tight_layout()
+        fig.suptitle('{model} - {country} - Forecasts'.format(model=self.model_type, country=self.country),
+                     fontsize=16, y=1.05)
+
+        plt.savefig(".\Exports\{country}_main_forecast.png".format(country=self.country), bbox_inches='tight')
+
+    def plot_main_forecasts_hospital(self,  figsize=(15, 5), hospital_line=False):
+
+        fig, axes = plt.subplots(nrows=1, ncols=2, figsize=figsize)
+
+        axes[0].set_title('Fatalities fit')
+        axes[1].set_title('Hospital Demand')
+
+        ax = axes[1]
+        self.df['H'].plot(ax=ax, color=red, label='Hospital Demand')
+        self.df['F'].plot(ax=ax, color=grey, label='Fatalities')
+        self.df['F_Actual'].plot(ax=ax, color=yellow, label='True Fatalities')
+
+        self.df[['H', 'F', 'F_Actual']].to_excel(".\Exports\{country}_HF_level.xlsx".format(country=self.country))
+
+        if hospital_line:
+            ax.axhline(y=61800, color='black', linestyle='--', label='Hospital Capacity')
+        ax.legend()
+
+        ax = axes[0]
+        self.df['F'].diff().plot(ax=ax, color=grey, label='Forecast fatalities')
+        self.df['F_Actual'].diff().plot(ax=ax, color=yellow, label='Fatalities')
+        df = self.df.copy()
+        df['F'] = df['F'].diff()
+        df['F_Actual'] = df['F_Actual'].diff()
+        df[['F', 'F_Actual']].to_excel(".\Exports\{country}_HF_diff.xlsx".format(country=self.country))
+
+        ax.legend()
+
+        plt.tight_layout()
+        fig.suptitle('{model} - {country} - Forecasts'.format(model=self.model_type, country=self.country),
+                     fontsize=16, y=1.05)
+
+        plt.savefig(".\Exports\{country}_main_forecast.png".format(country=self.country), bbox_inches='tight')
 
 class SIRFH_Sigmoid(SIRFH):
     """
@@ -1315,58 +1601,58 @@ class SIRFH_Sigmoid(SIRFH):
 
 
 if __name__ == '__main__':
-    cutDate = dt.datetime(2020, 3, 18)
-
     hospRate = 0.05
     deltaUpperBound = 79 / 165
+    cut_sample_date = dt.datetime(2020, 5, 14)
 
-    t1 = SIRFH_Sigmoid(country='Spain',
-                       # quarantineDate = dt.datetime(2020,3,24), #italy lockdown was on the 9th
-                       hospitalization_rate=hospRate,
-                       alpha=[.000, .000, .9998],
+    t1 = SIRFH(country='Korea, South',
+               # quarantineDate = dt.datetime(2020,3,24), #italy lockdown was on the 9th
+               hospitalization_rate=hospRate,
+               alpha=[.00, 0.00, .998],
 
-                       cut_sample_date=cutDate,
-                       # Loose restrictions
-                       # S0pbounds=(10e6 / 200e6, 10e6 / 200e6),
-                       # delta_bounds=(0, deltaUpperBound),
-                       # betaBounds=(0.20, 1.5),
-                       # gammaBounds=(0.01, .2),
-                       # gamma_i_bounds=(1/(20), 1/(1)),
-                       # gamma_h_bounds=(1/(8*7), 1/(2*7)),
-                       # omega_bounds=(1/(4*7), 1/(3)),
+               # Loose restrictions
+               # S0pbounds=(10e6 / 200e6, 10e6 / 200e6),
+               # delta_bounds=(0, deltaUpperBound),
+               # betaBounds=(0.20, 1.5),
+               # gammaBounds=(0.01, .2),
+               # gamma_i_bounds=(1/(20), 1/(1)),
+               # gamma_h_bounds=(1/(8*7), 1/(2*7)),
+               # omega_bounds=(1/(4*7), 1/(3)),
 
-                       # Tight restrictions
-                       # S0pbounds=(10e6 / N, 10e6 / N),
-                       force_parameters={
-                           # 'S0p': .05,
-                           # 'delta': 79/165,
-                           # 'beta1': 0.31118164052008357,
-                           # 'beta2': .2,
-                           # 'gamma_i': 0.19999999999999982,
-                           # 'gamma_h': 0.023809523809525043,
-                           # 'omega': 0.14199161301361687,
-                           # 'lambda': 0.5,
+               # Tight restrictions
+               # S0pbounds=(10e6 / N, 10e6 / N),
+               force_parameters={
+                   # 'S0p': .05,
+                   # 'delta': 79/165,
+                   # 'beta1': 0.31118164052008357,
+                   # 'beta2': .2,
+                   # 'gamma_i': 0.19999999999999982,
+                   # 'gamma_h': 0.023809523809525043,
+                   # 'omega': 0.14199161301361687,
+                   # 'lambda': 0.5,
 
-                       },
+               },
 
-                       parameter_bounds={
-                           'S0p': (.0001, .02),
-                           #    'delta': (0, deltaUpperBound),
-                           #    'beta1': (0.20, 1.5),
-                           #    'beta2': (0.20, 1.5),
-                           'gamma_i': (1 / (14), 1 / (4)),
-                           'gamma_h': (1 / (6.5 * 7), 1 / (2.5 * 7)),
-                           'omega': (1 / (21), 1 / (5)),
-                           #    'lambda': (.5,2)
+               parameter_bounds={
+                   'S0p': (.0001, .02),
+                   #    'delta': (0, deltaUpperBound),
+                   #    'beta1': (0.20, 1.5),
+                   #    'beta2': (0.20, 1.5),
+                   'gamma_i': (1 / (14), 1 / (4)),
+                   'gamma_h': (1 / (6.5 * 7), 1 / (2.5 * 7)),
+                   'omega': (1 / (21), 1 / (5)),
+                   #    'lambda': (.5,2)
 
-                       },
+               },
 
-                       constraints_bounds={
-                           'R0': (1, 4),
-                       },
+               constraints_bounds={
+                   'R0': (1, 6),
+               },
 
-                       )
+               cut_sample_date = cut_sample_date,
+
+               )
 
     # t1.train_S0()
     t1.train()
-    t1.outOfSample_forecast_scenarios(diff=True)
+    roll = t1.rolling_peak()
