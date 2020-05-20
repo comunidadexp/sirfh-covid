@@ -28,6 +28,7 @@ class SIR(object):
                  hospitalization_rate=0.05,
                  adjust_recovered=True,
                  cut_sample_date=None,
+                 dir = ".\\COVID-19\\csse_covid_19_data\\csse_covid_19_time_series\\"
                  ):
 
         self.all_attributes = locals()
@@ -40,6 +41,7 @@ class SIR(object):
         self.parameter_bounds = parameter_bounds
         self.force_parameters = force_parameters
         self.cut_sample_date = cut_sample_date
+        self.dir = dir
 
         initial_guesses = {
             'beta': .2,
@@ -65,21 +67,20 @@ class SIR(object):
         self.quarantine_loc = float(self.confirmed.index.get_loc(self.quarantine_date))
         self.model_type = 'SIR'
 
-    def load_CSSE(self,
-                       dir=".\\COVID-19\\csse_covid_19_data\\csse_covid_19_time_series\\"):
+    def load_CSSE(self,):
 
-        confirmed = pd.read_csv(dir+"time_series_covid19_confirmed_global.csv")
+        confirmed = pd.read_csv(self.dir+"time_series_covid19_confirmed_global.csv")
         confirmed = confirmed.drop(confirmed.columns[[0, 2, 3]], axis=1).set_index('Country/Region').T
         confirmed.index = pd.to_datetime(confirmed.index)
         self.confirmed = confirmed[self.country]
 
 
-        deaths = pd.read_csv(dir + "time_series_covid19_deaths_global.csv")
+        deaths = pd.read_csv(self.dir + "time_series_covid19_deaths_global.csv")
         deaths = deaths.drop(deaths.columns[[0, 2, 3]], axis=1).set_index('Country/Region').T
         deaths.index = pd.to_datetime(deaths.index)
         self.fatal = deaths[self.country]
 
-        recovered = pd.read_csv(dir + "time_series_covid19_recovered_global.csv")
+        recovered = pd.read_csv(self.dir + "time_series_covid19_recovered_global.csv")
         recovered = recovered.drop(recovered.columns[[0, 2, 3]], axis=1).set_index('Country/Region').T
         recovered.index = pd.to_datetime(recovered.index)
         self.recovered = recovered[self.country]
