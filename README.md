@@ -4,19 +4,19 @@ This model was created based on general [compartmental models in epidemiology](h
 
 It was open sourced on the 19th of may 2020 with an [explanatory report](https://conteudos.xpi.com.br/guia-de-investimentos/relatorios/um-modelo-para-o-coronavirus/).
 
-A quick glance and introduction to the model is available on the [case study notebook](https://github.com/comunidadexp/sirfh-covid/blob/master/Case%20Study%20-%20Sigmoid%20SIRFH.ipynb) for South Korea, Italy, Spain, Germany, USA and Brazil.
+A quick glance and an introduction to the model is available on the [case study notebook](https://github.com/comunidadexp/sirfh-covid/blob/master/Case%20Study%20-%20Sigmoid%20SIRFH.ipynb) for South Korea, Italy, Spain, Germany, USA and Brazil.
 
 # Requirements
 
-All the libraries requirements are satisfied by the [Anaconda distribution](https://www.anaconda.com/).
+All the libraries required are contained in the [Anaconda distribution](https://www.anaconda.com/).
 
-The other requirements concern data sources. Most data comes from [Johns Hopkins University repository](https://github.com/CSSEGISandData/COVID-19). The code needs a working copy of that repository. The path to it should be passed to any `SIR` or `SIRFH` classes as the parameter `dir`. The default path is the root directory of this repository. Just clone the JHU repo into the same folder as this one. 
+The other requirements concern data sources. Most data comes from [Johns Hopkins University repository](https://github.com/CSSEGISandData/COVID-19). **The code needs a working copy of that repository**. The path to it should be passed to any `SIR` or `SIRFH` classes as the parameter `dir`. The default path is the root directory of this repository. Just clone the JHU repo into the same folder as this one. 
 
 Additionally, we added two spreadsheets with total population data and quarantine declaration dates for the studied countries. Should other countries be added, they must be named exactly according to the JHU files standard.
 
 # Overview
 
-The new user should check the [case study notebook](https://github.com/comunidadexp/sirfh-covid/blob/master/Case%20Study%20-%20Sigmoid%20SIRFH.ipynb) that contains several examples of the *Sigmoid-SIRFH* usage and the visualization tools.
+First-timers should check the [case study notebook](https://github.com/comunidadexp/sirfh-covid/blob/master/Case%20Study%20-%20Sigmoid%20SIRFH.ipynb) that contains several examples of the *Sigmoid-SIRFH* usage and the visualization tools.
 
 The code is mostly implemented in the `SIR_models.py` file that consists of three classes.
 
@@ -61,36 +61,30 @@ The *susceptible* (S) compartment
 
 <img src="https://render.githubusercontent.com/render/math?math=\frac{dS}{dt} = - \frac{\beta IS}{N}"> 
 <br>
-<br>
 
 The *infected* (I) compartment
 
 <img src="https://render.githubusercontent.com/render/math?math=\frac{dI}{dt} = (1 - \rho) \times \frac{\beta IS}{N} - \gamma_{I} I">
-<br>
 <br>
 
 The hospitalized-to-recover compartment (Hr)
 
 <img src="https://render.githubusercontent.com/render/math?math=\frac{dH_r}{dt} = \rho \times (1-\delta) \times \frac{\beta IS}{N} - \gamma_h H_r">
 <br>
-<br>
 
 The hospitalized-to-be-fatal compartment (Hf)
 
 <img src="https://render.githubusercontent.com/render/math?math=\frac{dH_f}{dt} = \rho \times \delta \times \frac{\beta IS}{N} - \omega H_f">
-<br>
 <br>
 
 The recovered compartment (Hf)
 
 <img src="https://render.githubusercontent.com/render/math?math=\frac{dR}{dt} = \gamma_{I} I_n + \gamma_h H_r">
 <br>
-<br>
 
 The fatalities compartment (F)
 
 <img src="https://render.githubusercontent.com/render/math?math=\frac{dF}{dt} =\omega H_f">
-<br>
 <br>
 
 Finally, the time dynamics added to the `beta` parameter are done in a *[sigmoid](https://en.wikipedia.org/wiki/Sigmoid_function)* fashion, in which the inflection point is set to be on the 7th day after the quarantine declaration date.
