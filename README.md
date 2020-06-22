@@ -10,7 +10,7 @@ A quick glance and an introduction to the model is available on the [case study 
 
 ## Windows with virtual environment
 
-Inside the folder .\, copy and paste on command line
+Inside the folder `.\`, copy and paste on command line
 ```bat
 python -m venv venv
 .\venv\Scripts\activate
@@ -33,6 +33,7 @@ The showroom is given by `Case Study - Sigmoid SIRFH.ipynb`. Give it a try =)
 
 ## Linux (Debian) with virtual environment
 
+Inside the folder `./`, copy and paste on command line
 ```sh
 python3.8 -m venv venv
 source ./venv/bin/activate
