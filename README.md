@@ -8,7 +8,7 @@ A quick glance and an introduction to the model is available on the [case study 
 
 # TL;DR
 
-## Windows
+## Windows with virtual environment
 
 Inside the folder .\, copy and paste on command line
 ```bat
@@ -31,7 +31,7 @@ git clone https://github.com/CSSEGISandData/COVID-19.git
 
 The showroom is given by `Case Study - Sigmoid SIRFH.ipynb`. Give it a try =)
 
-## Linux (Debian)
+## Linux (Debian) with virtual environment
 
 ```sh
 python3.8 -m venv venv
