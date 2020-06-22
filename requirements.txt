@@ -1,0 +1,10 @@
+numpy
+matplotlib
+pandas
+plotly
+jupyter
+scipy
+ipython-autotime
+snakeviz
+xlrd
+openpyxl
