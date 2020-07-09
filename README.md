@@ -6,6 +6,54 @@ It was open sourced on the 19th of may 2020 with an [explanatory report](https:/
 
 A quick glance and an introduction to the model is available on the [case study notebook](https://github.com/comunidadexp/sirfh-covid/blob/master/Case%20Study%20-%20Sigmoid%20SIRFH.ipynb) for South Korea, Italy, Spain, Germany, USA and Brazil.
 
+# TL;DR
+
+## Windows with virtual environment
+
+Inside the folder `.\`, copy and paste on command line
+```bat
+python -m venv venv
+.\venv\Scripts\activate
+```
+
+Then copy and paste
+```bat
+python -m pip install --upgrade pip
+pip install --upgrade cython
+pip install wheel
+pip install -r requirements.txt
+```
+
+Then download Covid data that fits SIR classes requirements
+```bat
+git clone https://github.com/CSSEGISandData/COVID-19.git
+```
+
+The showroom is given by `Case Study - Sigmoid SIRFH.ipynb`. Give it a try =)
+
+## Linux (Debian) with virtual environment
+
+Inside the folder `./`, copy and paste on command line
+```sh
+python3.8 -m venv venv
+source ./venv/bin/activate
+```
+
+Then copy and paste
+```sh
+python -m pip install --upgrade pip
+pip install --upgrade cython
+pip install wheel
+pip install -r requirements.txt
+```
+
+Then download Covid data that fits SIR classes requirements
+```bat
+git clone https://github.com/CSSEGISandData/COVID-19.git
+```
+
+The showroom is given by `Case Study - Sigmoid SIRFH.ipynb`. Give it a try =)
+
 # Requirements
 
 All the libraries required are contained in the [Anaconda distribution](https://www.anaconda.com/).

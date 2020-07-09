@@ -1,4 +1,6 @@
 
+import os
+
 import numpy as np
 import pandas as pd
 from scipy.integrate import solve_ivp
@@ -28,7 +30,12 @@ class SIR(object):
                  hospitalization_rate=0.05,
                  adjust_recovered=True,
                  cut_sample_date=None,
-                 dir = ".\\COVID-19\\csse_covid_19_data\\csse_covid_19_time_series\\"
+                 dir = os.path.join(
+                     ".",
+                     "COVID-19",
+                     "csse_covid_19_data",
+                     "csse_covid_19_time_series",
+                 )
                  ):
 
         self.all_attributes = locals()
@@ -42,6 +49,7 @@ class SIR(object):
         self.force_parameters = force_parameters
         self.cut_sample_date = cut_sample_date
         self.dir = dir
+        if not os.path.exists("Exports"): os.mkdir("Exports")
 
         initial_guesses = {
             'beta': .2,
@@ -69,18 +77,33 @@ class SIR(object):
 
     def load_CSSE(self,):
 
-        confirmed = pd.read_csv(self.dir+"time_series_covid19_confirmed_global.csv")
+        confirmed = pd.read_csv(
+            os.path.join(
+                self.dir,
+                "time_series_covid19_confirmed_global.csv"
+            )
+        )
         confirmed = confirmed.drop(confirmed.columns[[0, 2, 3]], axis=1).set_index('Country/Region').T
         confirmed.index = pd.to_datetime(confirmed.index)
         self.confirmed = confirmed[self.country]
 
 
-        deaths = pd.read_csv(self.dir + "time_series_covid19_deaths_global.csv")
+        deaths = pd.read_csv(
+            os.path.join(
+                self.dir,
+                "time_series_covid19_deaths_global.csv"
+            )
+        )
         deaths = deaths.drop(deaths.columns[[0, 2, 3]], axis=1).set_index('Country/Region').T
         deaths.index = pd.to_datetime(deaths.index)
         self.fatal = deaths[self.country]
 
-        recovered = pd.read_csv(self.dir + "time_series_covid19_recovered_global.csv")
+        recovered = pd.read_csv(
+            os.path.join(
+                self.dir,
+                "time_series_covid19_recovered_global.csv"
+            )
+        )
         recovered = recovered.drop(recovered.columns[[0, 2, 3]], axis=1).set_index('Country/Region').T
         recovered.index = pd.to_datetime(recovered.index)
         self.recovered = recovered[self.country]
@@ -557,8 +580,11 @@ class SIR(object):
         ax.legend()
         df = pd.concat([actual, forecast_outOfSample, forecast_inSample, lowerBound, upperBound], axis=1)
         df.columns = ['Actual', 'Forecast_outOfSample', 'Forecast_inSample', 'lowerBound', 'upperBound']
-        df.to_excel(".\Exports\{country}_forecast_{days}days_diff_{diff}.xlsx".format(country=self.country,
-                                                                            days=window, diff=diff,))
+        df.to_excel(os.path.join(
+            ".",
+            "Exports",
+            f"{self.country}_forecast_{window}days_diff_{diff}.xlsx",
+        ))
 
     def outOfSample_forecast_scenarios(self, cutDate=None, days=[7, 14], scenarios=[.005, .01, .015], verbose=False, figsize=(15,10)):
 
@@ -594,7 +620,14 @@ class SIR(object):
                                                                             country=self.country, method=method),
                      fontsize=16, y=1.05)
 
-        plt.savefig(".\Exports\{country}_outOfSample_forecast.png".format(country=self.country), bbox_inches='tight')
+        plt.savefig(
+            os.path.join(
+                ".",
+                "Exports",
+                f"{self.country}_outOfSample_forecast.png"
+            ),
+            bbox_inches='tight'
+        )
 
         return True
 
@@ -1201,19 +1234,36 @@ class SIRFH(SIR):
         fig.suptitle('Fatality peak forecast - {country}'.format(model=self.model_type, country=self.country,),
                      fontsize=16, y=1.05)
 
-        plt.savefig(".\Exports\{country}_rolling_peak.png".format(country=self.country), bbox_inches='tight')
+        plt.savefig(
+            os.path.join(
+                ".",
+                "Exports",
+                f"{self.country}_rolling_peak.png"
+            ),
+            bbox_inches='tight'
+        )
 
         export_df = self.rolling_peak_df[['Current peak', 'Estimated peak', 'LB', 'UB', 'Peak max']].copy()
-        export_df.to_excel(".\Exports\{country}_rolling_peak_dates.xlsx".format(
-            country=self.country))
+        export_df.to_excel(
+            os.path.join(
+                ".",
+                "Exports",
+                f"{self.country}_rolling_peak_dates.xlsx"
+            )
+        )
 
         export_df = export_df - self.F_actual.index[0]
         export_df = export_df / np.timedelta64(1, 'D')
 
         export_df.index = (export_df.index - self.F_actual.index[0]) / np.timedelta64(1, 'D')
 
-        export_df.to_excel(".\Exports\{country}_rolling_peak.xlsx".format(
-            country=self.country))
+        export_df.to_excel(
+            os.path.join(
+                ".",
+                "Exports",
+                f"{self.country}_rolling_peak.xlsx"
+            )
+        )
 
         return self.rolling_peak_df
 
@@ -1281,7 +1331,14 @@ class SIRFH(SIR):
         fig.suptitle('Daily Deaths Forecast - {country}'.format(model=self.model_type, country=self.country,),
                      fontsize=16, y=1.05)
 
-        plt.savefig(".\Exports\{country}_rolling_n_fatal.png".format(country=self.country), bbox_inches='tight')
+        plt.savefig(
+            os.path.join(
+                ".",
+                "Exports",
+                f"{self.country}_rolling_n_fatal.png"
+            )
+            , bbox_inches='tight'
+        )
 
         return self.rolling_peak_df
 
@@ -1365,7 +1422,13 @@ class SIRFH(SIR):
         self.df['F_Actual'].plot(ax=ax, color=grey, label='Fatalities')
         self.df['F'].plot(ax=ax, color=yellow, label='Forecast fatalities')
 
-        self.df[['F_Actual', 'F']].to_excel(".\Exports\{country}_HF_level.xlsx".format(country=self.country))
+        self.df[['F_Actual', 'F']].to_excel(
+            os.path.join(
+                ".",
+                "Exports",
+                f"{self.country}_HF_level.xlsx"
+            )
+        )
 
         ax.legend()
 
@@ -1375,7 +1438,13 @@ class SIRFH(SIR):
         df = self.df.copy()
         df['F'] = df['F'].diff()
         df['F_Actual'] = df['F_Actual'].diff()
-        df[['F', 'F_Actual']].to_excel(".\Exports\{country}_HF_diff.xlsx".format(country=self.country))
+        df[['F', 'F_Actual']].to_excel(
+            os.path.join(
+                ".",
+                "Exports",
+                f"{self.country}_HF_diff.xlsx"
+            )
+        )
 
         ax.legend()
 
@@ -1383,7 +1452,14 @@ class SIRFH(SIR):
         fig.suptitle('{model} - {country} - Forecasts'.format(model=self.model_type, country=self.country),
                      fontsize=16, y=1.05)
 
-        plt.savefig(".\Exports\{country}_main_forecast.png".format(country=self.country), bbox_inches='tight')
+        plt.savefig(
+            os.path.join(
+                ".",
+                "Exports",
+                f"{self.country}_main_forecast.png"
+            ),
+            bbox_inches='tight'
+        )
 
     def plot_main_forecasts_hospital(self,  figsize=(15, 5), hospital_line=False):
 
@@ -1397,7 +1473,13 @@ class SIRFH(SIR):
         self.df['F'].plot(ax=ax, color=grey, label='Fatalities')
         self.df['F_Actual'].plot(ax=ax, color=yellow, label='True Fatalities')
 
-        self.df[['H', 'F', 'F_Actual']].to_excel(".\Exports\{country}_HF_level.xlsx".format(country=self.country))
+        self.df[['H', 'F', 'F_Actual']].to_excel(
+            os.path.join(
+                ".",
+                "Exports",
+                f"{self.country}_HF_level.xlsx"
+            ),
+        )
 
         if hospital_line:
             ax.axhline(y=61800, color='black', linestyle='--', label='Hospital Capacity')
@@ -1409,7 +1491,13 @@ class SIRFH(SIR):
         df = self.df.copy()
         df['F'] = df['F'].diff()
         df['F_Actual'] = df['F_Actual'].diff()
-        df[['F', 'F_Actual']].to_excel(".\Exports\{country}_HF_diff.xlsx".format(country=self.country))
+        df[['F', 'F_Actual']].to_excel(
+            os.path.join(
+                ".",
+                "Exports",
+                f"{self.country}_HF_diff.xlsx"
+            ),
+        )
 
         ax.legend()
 
@@ -1417,7 +1505,14 @@ class SIRFH(SIR):
         fig.suptitle('{model} - {country} - Forecasts'.format(model=self.model_type, country=self.country),
                      fontsize=16, y=1.05)
 
-        plt.savefig(".\Exports\{country}_main_forecast.png".format(country=self.country), bbox_inches='tight')
+        plt.savefig(
+            os.path.join(
+                ".",
+                "Exports",
+                f"{self.country}_main_forecast.png"
+            ),
+            bbox_inches='tight'
+        )
 
 class SIRFH_Sigmoid(SIRFH):
     """
